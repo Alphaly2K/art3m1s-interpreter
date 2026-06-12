@@ -177,25 +177,33 @@ pub fn execute_var_system(
 
         "os" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            #[cfg(target_os = "windows")]
-            let os = "windows";
-            #[cfg(target_os = "macos")]
-            let os = "macos";
-            #[cfg(target_os = "linux")]
-            let os = "linux";
-            #[cfg(target_os = "ios")]
-            let os = "iphone";
-            #[cfg(target_os = "android")]
-            let os = "android";
-            #[cfg(not(any(
-                target_os = "windows",
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "ios",
-                target_os = "android"
-            )))]
-            let os = "unknown";
-            variables.set(name, Value::String(os.to_string()));
+            // 优先返回项目配置的目标平台（解释器面向某目标平台运行，而非宿主机器）。
+            // 脚本据此选择机种分支（windows/android/ios/wasm 等），其表里并无 macos/linux。
+            // 仅当未配置平台时，才退回宿主 OS 作为兜底。
+            let os = if !variables.platform().is_empty() {
+                variables.platform().to_string()
+            } else {
+                #[cfg(target_os = "windows")]
+                let host = "windows";
+                #[cfg(target_os = "macos")]
+                let host = "macos";
+                #[cfg(target_os = "linux")]
+                let host = "linux";
+                #[cfg(target_os = "ios")]
+                let host = "iphone";
+                #[cfg(target_os = "android")]
+                let host = "android";
+                #[cfg(not(any(
+                    target_os = "windows",
+                    target_os = "macos",
+                    target_os = "linux",
+                    target_os = "ios",
+                    target_os = "android"
+                )))]
+                let host = "unknown";
+                host.to_string()
+            };
+            variables.set(name, Value::String(os));
         }
 
         "fullscreen" | "minimize" => {

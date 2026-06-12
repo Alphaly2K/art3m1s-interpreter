@@ -68,6 +68,11 @@ pub struct InterpreterConfig {
 
     /// 其他自定义环境变量（供脚本通过 s.* 访问）
     pub env: HashMap<String, String>,
+
+    /// 目标平台标识（小写：windows / android / ios / wasm 等）。
+    /// 决定 `[var system="os"]` 返回值——解释器面向某一目标平台运行，而非宿主机器，
+    /// 故不能用编译期 `cfg!(target_os)`。脚本据此选择机种分支。
+    pub platform: String,
 }
 
 impl Default for InterpreterConfig {
@@ -89,6 +94,7 @@ impl Default for InterpreterConfig {
             title: None,
             process_id: None,
             env: HashMap::new(),
+            platform: "windows".to_string(),
         }
     }
 }
@@ -155,6 +161,16 @@ impl Interpreter {
     pub fn new(config: InterpreterConfig) -> Self {
         let lua = Lua::new();
         let variables = Arc::new(Mutex::new(VariableStore::new()));
+        {
+            let mut vars = variables.lock().unwrap();
+            // 把目标平台写入变量存储，供 [var system="os"] 读取（见 InterpreterConfig::platform）。
+            vars.set_platform(config.platform.clone());
+            // 引擎提供的系统常量（s.*）。它们不是存档状态，而是运行环境信息，脚本启动
+            // 时直接读取。缺省会让 init.lua 里的数值比较（如 windowsversion 兼容性检查）
+            // 对 nil 求值而崩溃，故在此种入合理默认值。
+            vars.set("s.engineversion", crate::variable::Value::String("4.00".to_string()));
+            vars.set("s.windowsversion", crate::variable::Value::String("10.0".to_string()));
+        }
         let mut engine_ctx_inner = EngineContext::new(Box::new(DefaultEngineCallbacks));
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
         engine_ctx_inner.variables = Some(Arc::clone(&variables));

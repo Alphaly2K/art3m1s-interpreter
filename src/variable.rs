@@ -140,12 +140,26 @@ pub struct VariableStore {
     /// 系统变量 (s.)
     #[serde(default)]
     system: HashMap<String, Value>,
+    /// 目标平台标识（windows/android/ios/wasm 等），供 `[var system="os"]` 返回。
+    /// 不参与存档序列化——它由运行时配置决定，而非游戏进度的一部分。
+    #[serde(skip)]
+    platform: String,
 }
 
 impl VariableStore {
     /// 创建新的变量存储
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 设置目标平台标识（windows/android/ios/wasm 等）。
+    pub fn set_platform(&mut self, platform: impl Into<String>) {
+        self.platform = platform.into();
+    }
+
+    /// 目标平台标识。空串表示未配置。
+    pub fn platform(&self) -> &str {
+        &self.platform
     }
 
     /// 获取变量值
