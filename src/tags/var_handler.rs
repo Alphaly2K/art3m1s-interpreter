@@ -3,8 +3,46 @@
 //! 实现 [var system="xxx"] 的各种系统功能。
 
 use crate::error::Result;
+use crate::expression::ExpressionEvaluator;
 use crate::variable::{Value, VariableStore};
 use std::collections::HashMap;
+
+/// 应用一个 `var` 标签到变量存储（同步落值）。
+///
+/// 这是 `[var ...]` 标签语义的纯逻辑实现，VarHandler 与 Lua 的 `e:tag{"var",...}`
+/// 都走这里。关键在于 var 标签不产出任何事件（始终 Continue），因此 Lua 在同一函数
+/// 内 `e:tag{"var", name="t.w", system=...}` 之后立刻 `e:var("t.w")` 时，必须已经落值，
+/// 否则读到 nil。把落值动作放在入队/执行的同一处，即可消除该时序窗口。
+///
+/// 表达式参数（system 变体的 source/string/... 以及简单形式的 data）在此就地解析。
+pub fn apply_var_tag(params: &HashMap<String, String>, variables: &mut VariableStore) -> Result<()> {
+    if let Some(system) = params.get("system") {
+        let system = system.clone();
+
+        // 先解析所有可能含表达式的参数（解析期间只读 variables）。
+        let mut resolved: HashMap<String, Value> = HashMap::new();
+        {
+            let evaluator = ExpressionEvaluator::new(variables);
+            for key in &["source", "string", "min", "max", "position", "length"] {
+                if let Some(val) = params.get(*key) {
+                    resolved.insert(key.to_string(), evaluator.resolve_param(val)?);
+                }
+            }
+        }
+
+        execute_var_system(&system, params, &resolved, variables)?;
+        return Ok(());
+    }
+
+    let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
+    let data = params.get("data").map(|s| s.as_str()).unwrap_or("");
+    let value = {
+        let evaluator = ExpressionEvaluator::new(variables);
+        evaluator.resolve_param(data)?
+    };
+    variables.set(name, value);
+    Ok(())
+}
 
 /// 执行 var system= 变体
 pub fn execute_var_system(

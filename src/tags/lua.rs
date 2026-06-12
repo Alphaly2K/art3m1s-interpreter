@@ -31,7 +31,6 @@ impl TagHandler for CallLuaHandler {
         // 调用 Lua 函数，传入 engine 对象和额外参数
         call_lua_function(
             ctx.lua,
-            ctx.variables,
             function_name,
             &extra_params,
         )?;
@@ -43,7 +42,6 @@ impl TagHandler for CallLuaHandler {
 /// 调用 Lua 函数，将 engine 对象作为第一个参数传入
 pub fn call_lua_function(
     lua: &mlua::Lua,
-    _variables: &mut crate::variable::VariableStore,
     function_name: &str,
     _extra_params: &std::collections::HashMap<String, String>,
 ) -> Result<()> {

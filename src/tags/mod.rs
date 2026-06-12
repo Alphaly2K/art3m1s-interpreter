@@ -583,29 +583,7 @@ struct VarHandler;
 
 impl TagHandler for VarHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        // 检查是否是特殊系统功能
-        if let Some(system) = ctx.instruction.get("system") {
-            let system = system.to_string();
-
-            // 先解析所有需要表达式的参数
-            let mut resolved_params: HashMap<String, Value> = HashMap::new();
-            for key in &["source", "string", "min", "max", "position", "length"] {
-                if let Some(val) = ctx.instruction.get(*key) {
-                    let resolved = ctx.evaluator().resolve_param(val)?;
-                    resolved_params.insert(key.to_string(), resolved);
-                }
-            }
-
-            var_handler::execute_var_system(&system, &ctx.instruction.params, &resolved_params, ctx.variables)?;
-            return Ok(TagResult::Continue);
-        }
-
-        let name = ctx.instruction.get("name").unwrap_or("");
-        let data = ctx.instruction.get("data").unwrap_or("");
-
-        let value = ctx.evaluator().resolve_param(data)?;
-        ctx.variables.set(name, value);
-
+        var_handler::apply_var_tag(&ctx.instruction.params, ctx.variables)?;
         Ok(TagResult::Continue)
     }
 }

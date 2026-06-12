@@ -123,7 +123,10 @@ pub struct Interpreter {
     /// 已加载的脚本
     scripts: HashMap<String, Script>,
     /// 变量存储
-    variables: VariableStore,
+    ///
+    /// 用 `Arc<Mutex<_>>` 持有，以便与 [`EngineContext`] 共享同一份变量，使 Lua 中的
+    /// `e:var(name)` 能读取解释器写入的变量。
+    variables: Arc<Mutex<VariableStore>>,
     /// Lua 上下文
     lua: Lua,
     /// 标签处理器注册表
@@ -137,7 +140,10 @@ pub struct Interpreter {
     /// 脚本加载器（文本）
     script_loader: Option<ScriptLoader>,
     /// 脚本文件加载器（二进制，支持自动检测）
-    file_loader: Option<crate::event::ScriptFileLoader>,
+    ///
+    /// 用 `Arc` 持有，便于与 [`EngineContext::file_reader`] 共享同一个加载器，
+    /// 使 `e:include` 能读取项目文件。
+    file_loader: Option<crate::lua_engine::FileReader>,
     /// 事件回调
     callback: EventCallback,
     /// Lua engine 上下文
@@ -148,13 +154,17 @@ impl Interpreter {
     /// 创建新的解释器实例
     pub fn new(config: InterpreterConfig) -> Self {
         let lua = Lua::new();
-        let engine_ctx = Arc::new(Mutex::new(EngineContext::new(Box::new(DefaultEngineCallbacks))));
+        let variables = Arc::new(Mutex::new(VariableStore::new()));
+        let mut engine_ctx_inner = EngineContext::new(Box::new(DefaultEngineCallbacks));
+        // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
+        engine_ctx_inner.variables = Some(Arc::clone(&variables));
+        let engine_ctx = Arc::new(Mutex::new(engine_ctx_inner));
         let _ = crate::lua_engine::init_lua_engine_api(&lua, Arc::clone(&engine_ctx));
 
         Self {
             config,
             scripts: HashMap::new(),
-            variables: VariableStore::new(),
+            variables,
             lua,
             tag_registry: TagRegistry::new(),
             current_script: None,
@@ -222,8 +232,14 @@ impl Interpreter {
     /// 设置脚本文件加载器（支持文本和二进制格式的自动检测）
     ///
     /// 这是推荐的方式，能够自动处理 .iet/.ast（文本）和 .asb（二进制）文件。
+    ///
+    /// 同一个加载器会被共享到 [`EngineContext`]，使 Lua 中的 `e:include` 能读取
+    /// 并执行项目内的 `.lua`/数据文件。
     pub fn set_file_loader(&mut self, loader: crate::event::ScriptFileLoader) {
-        self.file_loader = Some(loader);
+        // ScriptFileLoader 是 Box；转成 Arc 以便与 engine_ctx 共享同一闭包。
+        let shared: crate::lua_engine::FileReader = Arc::from(loader);
+        self.engine_ctx.lock().unwrap().file_reader = Some(Arc::clone(&shared));
+        self.file_loader = Some(shared);
     }
 
     /// 加载外部脚本（自动检测格式）
@@ -538,6 +554,7 @@ impl Interpreter {
             }
 
             match result {
+                TagResult::Continue => continue,
                 TagResult::Emit(event) | TagResult::Wait(event) => {
                     match (self.callback)(event.clone()) {
                         CallbackResult::Continue => continue,
@@ -545,9 +562,50 @@ impl Interpreter {
                         CallbackResult::Abort => return Err(Error::Aborted),
                     }
                 }
-                // Continue / 控制流类结果（Jump/Call/Return/Dynamic）不应来自
-                // Lua 排队的显示标签，安全忽略并处理下一个。
-                _ => continue,
+                // Lua 也会通过 eqtag/enqueueTag 排入控制流标签，最典型的是
+                // `eqtag{"jump", file=..., label="game_start"}`（跨脚本跳转返回
+                // TagResult::Call）。必须落实位置变更，否则 boot 推进不到 game_start。
+                // 改动 current_script/current_line 后继续抽干队列；flush 返回后
+                // step 主循环会从新位置读取指令。
+                TagResult::Jump(line) => {
+                    self.current_line = line;
+                    continue;
+                }
+                TagResult::Call { file, label, return_line, return_script } => {
+                    self.call_stack.push(CallFrame {
+                        script: return_script.clone(),
+                        return_line,
+                    });
+                    if let Some(target_file) = file {
+                        self.load_external_script(&target_file)?;
+                        let target_line = self
+                            .scripts
+                            .get(&target_file)
+                            .ok_or_else(|| Error::ScriptNotFound(target_file.clone()))?
+                            .get_label_line(&label)
+                            .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
+                        self.current_script = Some(target_file);
+                        self.current_line = target_line;
+                    } else {
+                        let line = self
+                            .scripts
+                            .get(&return_script)
+                            .ok_or_else(|| Error::ScriptNotFound(return_script.clone()))?
+                            .get_label_line(&label)
+                            .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
+                        self.current_line = line;
+                    }
+                    continue;
+                }
+                TagResult::Return => {
+                    if let Some(frame) = self.call_stack.pop() {
+                        self.current_script = Some(frame.script);
+                        self.current_line = frame.return_line;
+                    }
+                    continue;
+                }
+                // Dynamic 已在上面展开一层；理论上不会再出现，安全忽略。
+                TagResult::Dynamic(_) => continue,
             }
         }
     }
@@ -557,6 +615,29 @@ impl Interpreter {
         let script_name = self.current_script.clone().unwrap_or_default();
         let current_line = self.current_line;
 
+        // calllua 会同步执行 Lua 函数，而该函数可能回调 e:var（再次锁 variables）。
+        // 若在持有 variables 锁期间执行它会自锁死，故像 __lua_block 一样特判：
+        // 不持 variables 锁、直接调用。CallLuaHandler 本身也未使用 ctx.variables。
+        if instruction.tag == "calllua" {
+            let function_name = instruction.get("function").unwrap_or("");
+            if function_name.is_empty() {
+                return Err(Error::RuntimeError {
+                    line: current_line,
+                    message: "calllua 缺少 function 参数".to_string(),
+                });
+            }
+            let mut extra_params = HashMap::new();
+            for (key, value) in &instruction.params {
+                if key != "function" {
+                    extra_params.insert(key.clone(), value.clone());
+                }
+            }
+            // 关键：不持 variables 锁。call_lua_function 同步执行的 Lua 可能回调
+            // e:var（经共享句柄再次锁 variables），持锁会在非可重入 Mutex 上自锁死。
+            crate::tags::call_lua_function(&self.lua, function_name, &extra_params)?;
+            return Ok(TagResult::Continue);
+        }
+
         // 先获取 handler，避免借用冲突
         let handler_result = self.tag_registry.get(&instruction.tag);
 
@@ -564,8 +645,11 @@ impl Interpreter {
             // 创建上下文
             let get_script = |name: &str| -> Option<&Script> { self.scripts.get(name) };
 
+            // 锁定共享变量存储，仅在本次标签执行期间持有。非 Lua 执行类标签不会
+            // 重入 e:var，故此处持锁安全（calllua 已在上面特判，不走这里）。
+            let mut vars = self.variables.lock().unwrap();
             let mut ctx = ExecutionContext {
-                variables: &mut self.variables,
+                variables: &mut vars,
                 lua: &self.lua,
                 current_script: &script_name,
                 current_line,
@@ -593,14 +677,16 @@ impl Interpreter {
         self.step()
     }
 
-    /// 获取变量存储（用于存档）
-    pub fn variables(&self) -> &VariableStore {
-        &self.variables
+    /// 获取变量存储的快照（用于存档）
+    ///
+    /// 变量现由 `Arc<Mutex<_>>` 持有，返回克隆快照以避免暴露锁。
+    pub fn variables(&self) -> VariableStore {
+        self.variables.lock().unwrap().clone()
     }
 
-    /// 获取变量存储的可变引用
-    pub fn variables_mut(&mut self) -> &mut VariableStore {
-        &mut self.variables
+    /// 获取共享变量存储句柄（可变访问请锁定后操作）
+    pub fn variables_handle(&self) -> Arc<Mutex<VariableStore>> {
+        Arc::clone(&self.variables)
     }
 
     /// 获取解释器配置（包含从 system.ini 读取的环境变量）
@@ -634,7 +720,7 @@ impl Interpreter {
 
     /// 恢复变量状态（用于读档）
     pub fn restore_variables(&mut self, store: VariableStore) {
-        self.variables = store;
+        *self.variables.lock().unwrap() = store;
     }
 
     /// 获取 Lua 上下文
@@ -674,12 +760,12 @@ impl Interpreter {
 
     /// 设置变量
     pub fn set_variable(&mut self, name: &str, value: Value) {
-        self.variables.set(name, value);
+        self.variables.lock().unwrap().set(name, value);
     }
 
-    /// 获取变量
-    pub fn get_variable(&self, name: &str) -> Option<&Value> {
-        self.variables.get(name)
+    /// 获取变量（返回克隆值）
+    pub fn get_variable(&self, name: &str) -> Option<Value> {
+        self.variables.lock().unwrap().get(name).cloned()
     }
 }
 
