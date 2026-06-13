@@ -154,6 +154,15 @@ pub struct Interpreter {
     callback: EventCallback,
     /// Lua engine 上下文
     engine_ctx: Arc<Mutex<EngineContext>>,
+    /// 上一次返回的 `Wait` 是否来自**排队标签**（经 flush_tag_queue 抽干时产生）。
+    ///
+    /// 排队标签在 `[calllua]` 执行期间由 Lua 经 `e:tag{}` 排入，flush 发生在 step
+    /// 循环顶部，此时 `current_line` 已指向**下一条尚未执行**的指令。若宿主在 Wait
+    /// 释放后照常调用 `advance_line()`，会越过这条待执行指令——典型表现是 estag 链
+    /// 末尾的 `eqwait` 排队 `[wait]` 发出定时等待后，advance 把行号从 `[return]`
+    /// 跳到相邻的 `*movie_play [stop]`，导致 brandlogo 卡死。故此处记录来源，
+    /// 让 `advance_line()` 对排队来源的 Wait 退化为空操作。
+    last_wait_from_queue: bool,
 }
 
 impl Interpreter {
@@ -227,6 +236,7 @@ impl Interpreter {
             file_loader: None,
             callback: Box::new(default_callback),
             engine_ctx,
+            last_wait_from_queue: false,
         }
     }
 
@@ -348,6 +358,11 @@ impl Interpreter {
                 return Ok(result);
             }
 
+            // 走到这里说明队列已抽干，接下来执行的是脚本流里的内联指令；它若产生
+            // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
+            // 越过它。故在此把来源标记清为「非排队」。
+            self.last_wait_from_queue = false;
+
             let script_name = match &self.current_script {
                 Some(name) => name.clone(),
                 None => return Ok(ExecutionResult::Completed),
@@ -363,6 +378,14 @@ impl Interpreter {
             }
 
             let instruction = script.instructions[self.current_line].clone();
+
+            if std::env::var("ASB_TRACE_STEP").is_ok() {
+                eprintln!(
+                    "[step] {}:{} tag={} fn={:?}",
+                    script_name, self.current_line, instruction.tag,
+                    instruction.get("function")
+                );
+            }
 
             // 处理剧情文本
             if instruction.tag == "__text" {
@@ -600,6 +623,15 @@ impl Interpreter {
                 line: self.current_line,
             };
 
+            if std::env::var("ASB_TRACE_FLUSH").is_ok() {
+                eprintln!(
+                    "[flush] tag={} fn={:?} params={:?}",
+                    instruction.tag,
+                    instruction.get("function"),
+                    instruction.params.keys().collect::<Vec<_>>()
+                );
+            }
+
             // `tag` 标签自身会返回 Dynamic，需再展开一层拿到真正的指令。
             let mut result = self.execute_tag(&instruction)?;
             if let TagResult::Dynamic(inner) = result {
@@ -611,7 +643,12 @@ impl Interpreter {
                 TagResult::Emit(event) | TagResult::Wait(event) => {
                     match (self.callback)(event.clone()) {
                         CallbackResult::Continue => continue,
-                        CallbackResult::Pause => return Ok(Some(ExecutionResult::Wait(event))),
+                        CallbackResult::Pause => {
+                            // 这个 Wait 来自排队标签，current_line 已指向下一条待执行
+                            // 指令；记录来源，使 advance_line() 退化为空操作。
+                            self.last_wait_from_queue = true;
+                            return Ok(Some(ExecutionResult::Wait(event)));
+                        }
                         CallbackResult::Abort => return Err(Error::Aborted),
                     }
                 }
@@ -625,7 +662,25 @@ impl Interpreter {
                     // 停止 flush,让主循环从新位置开始执行
                     return Ok(None);
                 }
-                TagResult::Call { file, label, return_line, return_script } => {
+                TagResult::Call { file, label, return_line: _, return_script } => {
+                    // 排队 call 与内联 call 的返回语义不同：
+                    // 内联 call 时 `self.current_line` 指向 call 指令本身，handler
+                    // 用 `current_line + 1` 让 return 落到下一条指令是对的。
+                    // 但排队 call（Lua 经 enqueueTag 排入）是在 step 循环顶部抽干
+                    // 队列时执行的，此时 `self.current_line` 已经指向**尚未执行**的
+                    // 下一条指令。若仍用 handler 的 `current_line + 1`，return 会跳过
+                    // 这条待执行指令。因此排队 call 必须返回到 `self.current_line`
+                    // 本身，把它执行掉。
+                    // 典型案例：system_initialize 在 `[calllua]` 中 enqueueTag 三个
+                    // `[call]` 缓存系统脚本，return 必须回到紧随其后的
+                    // `[calllua system_starting]`，否则 boot 推进不到 title。
+                    let return_line = self.current_line;
+                    if std::env::var("ASB_TRACE_FLUSH").is_ok() {
+                        eprintln!(
+                            "[flush-call] file={:?} label={} return_line={} return_script={}",
+                            file, label, return_line, return_script
+                        );
+                    }
                     self.call_stack.push(CallFrame {
                         script: return_script.clone(),
                         return_line,
@@ -732,11 +787,40 @@ impl Interpreter {
         self.step()
     }
 
+    /// 触发注册在 `onEnterFrame` 上的每帧回调（Artemis 约定 `e:setEventHandler{
+    /// onEnterFrame="vsync"}`）。宿主应在每帧驱动一次。
+    ///
+    /// 该回调（如 `vsync`）承载大量周期性逻辑：清除 `flg.imageCacheStart` 加载等待
+    /// 标志、键盘 edge 检测、自动模式/快进、lipsync 等。若不驱动，`imageCacheStart`
+    /// 永不清除，会导致 `setonpush_calllua` 在入口直接 return，**所有按钮点击全部失效**。
+    ///
+    /// Lua 函数内部通过 `e:tag{}` 排队的标签留在队列里，由随后的 `run()` 抽干。
+    /// 注意：不能在持有 ctx 锁时调用 Lua（会重入再次锁 ctx），故先取出 handler 名
+    /// 释放锁，再调用——与 [`crate::tags::call_lua_function`] 的约束一致。
+    pub fn fire_enter_frame(&mut self) -> Result<()> {
+        let handler = {
+            let ctx = self.engine_ctx.lock().unwrap();
+            ctx.event_handlers.get("onEnterFrame").cloned()
+        };
+        if let Some(func) = handler {
+            crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
+        }
+        Ok(())
+    }
+
     /// 当前行号加一。
     ///
     /// 供宿主在 `run()` 返回 `ExecutionResult::Wait` 后调用，越过触发 Wait 的那条指令，
     /// 以便下一次 `run()` 能从下一指令继续执行（例如用户点击推进的 `[wt]` 等待）。
+    ///
+    /// 但若该 Wait 来自**排队标签**（见 [`Self::last_wait_from_queue`]），则
+    /// `current_line` 早已指向下一条待执行指令，此时再加一会越过它，故退化为空操作
+    /// （仅复位标记）。
     pub fn advance_line(&mut self) {
+        if self.last_wait_from_queue {
+            self.last_wait_from_queue = false;
+            return;
+        }
         self.current_line = self.current_line.saturating_add(1);
     }
 

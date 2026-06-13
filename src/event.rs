@@ -427,13 +427,8 @@ pub enum Event {
         call: bool,
         handler: Option<String>,
         penetration: bool,
-        /// Lua 鼠标点击回调函数名（参数 click="fn_name"）
-        click: Option<String>,
-        /// Lua 鼠标移入回调函数名（参数 over="fn_name"）
-        over: Option<String>,
-        /// Lua 鼠标移出回调函数名（参数 out="fn_name"）
-        out: Option<String>,
-        /// 透传给回调的额外参数（如 name、key、se 等）
+        /// 标签里除已知字段外的其它参数（name、key、se、function 等），
+        /// 触发事件时由宿主原样塞进 handler 标签的参数表。
         extra_params: std::collections::HashMap<String, String>,
     },
     /// 图层重命名 [lyrename]

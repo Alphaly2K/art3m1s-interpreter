@@ -317,7 +317,7 @@ impl UserData for EngineApi {
 
         // e:random()
         methods.add_method("random", |_lua, _this, _: ()| {
-            Ok(rand_f64())
+            Ok(rand_i64())
         });
 
         // e:now()
@@ -359,22 +359,31 @@ impl UserData for EngineApi {
 
         // e:var("name") -> 读取共享变量存储中的变量值。
         //
-        // 按变量原始类型返回对应 Lua 值（整数/浮点/字符串/布尔），不存在或 Null 返回
-        // nil。这样脚本里 `tn(e:var(..))`（tonumber）、数值比较与 `if e:var(..) then`
-        // 三种用法都成立。变量由 var 标签（e:tag{"var",...}）写入。
+        // 按变量原始类型返回对应 Lua 值（整数/浮点/字符串/布尔）。不存在或 Null 的
+        // 变量返回字符串 "0"——这是 Artemis 的核心约定（var.txt 标注返回类型为
+        // string，从不为 nil；脚本据此写 `if e:var(..) ~= "0"`、`== "0"`，例如
+        // system/adv/fileio.lua 的 fload_pluto 靠它判断配置是否首次创建）。返回
+        // nil 会让那些判断误判，导致 boot 在"系统数据已初始化"对话框处卡死。
+        // 数值用 tn(e:var(..)) 解析时 tn("0")==0，比较与 `if .. then` 也都成立
+        // （Lua 中 "0" 为真）。
         methods.add_method("var", |lua, this, name: String| {
             use crate::variable::Value as V;
             let ctx = this.ctx.lock().unwrap();
             let Some(vars) = &ctx.variables else {
-                return Ok(mlua::Value::Nil);
+                return Ok(mlua::Value::String(lua.create_string("0")?));
             };
             let store = vars.lock().unwrap();
             match store.get(&name) {
                 Some(V::Int(n)) => Ok(mlua::Value::Integer(*n)),
                 Some(V::Float(f)) => Ok(mlua::Value::Number(*f)),
-                Some(V::Bool(b)) => Ok(mlua::Value::Boolean(*b)),
+                // Artemis 变量系统没有独立布尔类型：比较/逻辑表达式（如 `$0==0`）
+                // 的结果在脚本里一律当整数 1/0 用，game 侧普遍写成
+                // `tn(e:var(...))`（即 tonumber）。若把 Bool 作为 Lua boolean 返回，
+                // tonumber(true) 得到 nil，cond() 会把成立的条件误判为 false
+                // （典型：brandlogo 的 `cond="s.sp==0"` 被跳过）。故在此折叠成 1/0。
+                Some(V::Bool(b)) => Ok(mlua::Value::Integer(if *b { 1 } else { 0 })),
                 Some(V::String(s)) => Ok(mlua::Value::String(lua.create_string(s)?)),
-                Some(V::Null) | None => Ok(mlua::Value::Nil),
+                Some(V::Null) | None => Ok(mlua::Value::String(lua.create_string("0")?)),
             }
         });
 
@@ -635,11 +644,24 @@ fn lua_value_to_key(v: &mlua::Value) -> String {
     }
 }
 
-/// 简单随机数
-fn rand_f64() -> f64 {
-    let seed = now_millis();
-    let x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    (x as f64) / (u64::MAX as f64)
+/// 随机整数（非负 31 位），对应 Artemis 的 `e:random()`。
+///
+/// 注意：游戏脚本里清一色是 `e:random() % N + 1` 的整数取模用法（见
+/// sysvo/macro/user/config 等），因此必须返回**整数**而非 [0,1) 浮点，
+/// 否则 `% N` 会得到小数、`tbl[小数]` 取到 nil，触发
+/// "attempt to get length of field '?'" 之类崩溃。
+fn rand_i64() -> i64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    // 用毫秒时间播种一次，之后靠原子计数推进，保证同毫秒内连续调用也不同。
+    let prev = STATE.load(Ordering::Relaxed);
+    let seed = if prev == 0 { now_millis() as u64 } else { prev };
+    let x = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    STATE.store(x, Ordering::Relaxed);
+    // 取高位做 31 位非负整数
+    ((x >> 33) & 0x7fff_ffff) as i64
 }
 
 /// 初始化 Lua 环境，注入 engine 对象

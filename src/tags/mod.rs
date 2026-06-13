@@ -513,6 +513,9 @@ struct StopHandler;
 impl TagHandler for StopHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let reason = ctx.instruction.get("0").map(String::from);
+        if std::env::var("ASB_TRACE_STOP").is_ok() {
+            eprintln!("[STOP] reason={:?} line={}", reason, ctx.instruction.line);
+        }
         Ok(TagResult::Wait(Event::Wait {
             reason: crate::event::WaitReason::Stop { reason },
         }))
@@ -523,9 +526,14 @@ impl TagHandler for StopHandler {
 struct WtHandler;
 
 impl TagHandler for WtHandler {
-    fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+    fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        // [wt] 是脚本宏 tags.wt → syswait → [wait input=1 time=0]（见游戏的
+        // system/adv/func.lua）。它是"让出一帧后按计时推进"的等待，缺省 time=0
+        // 表示下一帧立即推进（加载序列里用作 yield 点），而非等待点击。故与
+        // [wait] 一样产出 Timed，绝不能截成会阻塞点击的 Generic。
+        let time = ctx.resolve_param("time")?.as_int().unwrap_or(0) as u64;
         Ok(TagResult::Wait(Event::Wait {
-            reason: crate::event::WaitReason::Generic,
+            reason: crate::event::WaitReason::Timed { milliseconds: time },
         }))
     }
 }

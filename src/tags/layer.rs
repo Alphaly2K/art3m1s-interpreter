@@ -97,13 +97,12 @@ impl TagHandler for LyeventHandler {
         let penetration = ctx.instruction.get("penetration")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0) != 0;
-        let click = ctx.instruction.get("click").map(|s| s.to_string());
-        let over = ctx.instruction.get("over").map(|s| s.to_string());
-        let out = ctx.instruction.get("out").map(|s| s.to_string());
 
-        // 把已知字段以外的参数收集为 extra_params（name、key、se 等按钮元数据）。
+        // 把已知字段以外的参数收集为 extra_params（function、name、key、se 等）。
+        // 这些会在事件触发时由宿主原样塞进 handler 标签（如 calllua）的参数表，
+        // 引擎不解释其语义。
         let known = ["id", "type", "mode", "file", "label", "call", "handler",
-                     "penetration", "click", "over", "out"];
+                     "penetration"];
         let mut extra_params = std::collections::HashMap::new();
         for (k, v) in ctx.instruction.params.iter() {
             if !known.contains(&k.as_str()) {
@@ -120,9 +119,6 @@ impl TagHandler for LyeventHandler {
             call,
             handler,
             penetration,
-            click,
-            over,
-            out,
             extra_params,
         }))
     }
