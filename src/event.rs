@@ -422,6 +422,14 @@ pub enum Event {
         call: bool,
         handler: Option<String>,
         penetration: bool,
+        /// Lua 鼠标点击回调函数名（参数 click="fn_name"）
+        click: Option<String>,
+        /// Lua 鼠标移入回调函数名（参数 over="fn_name"）
+        over: Option<String>,
+        /// Lua 鼠标移出回调函数名（参数 out="fn_name"）
+        out: Option<String>,
+        /// 透传给回调的额外参数（如 name、key、se 等）
+        extra_params: std::collections::HashMap<String, String>,
     },
     /// 图层重命名 [lyrename]
     LayerRename {

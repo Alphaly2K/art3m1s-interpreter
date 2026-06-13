@@ -97,6 +97,19 @@ impl TagHandler for LyeventHandler {
         let penetration = ctx.instruction.get("penetration")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0) != 0;
+        let click = ctx.instruction.get("click").map(|s| s.to_string());
+        let over = ctx.instruction.get("over").map(|s| s.to_string());
+        let out = ctx.instruction.get("out").map(|s| s.to_string());
+
+        // 把已知字段以外的参数收集为 extra_params（name、key、se 等按钮元数据）。
+        let known = ["id", "type", "mode", "file", "label", "call", "handler",
+                     "penetration", "click", "over", "out"];
+        let mut extra_params = std::collections::HashMap::new();
+        for (k, v) in ctx.instruction.params.iter() {
+            if !known.contains(&k.as_str()) {
+                extra_params.insert(k.clone(), v.clone());
+            }
+        }
 
         Ok(TagResult::Emit(Event::LayerEventHandler {
             id,
@@ -107,6 +120,10 @@ impl TagHandler for LyeventHandler {
             call,
             handler,
             penetration,
+            click,
+            over,
+            out,
+            extra_params,
         }))
     }
 }
