@@ -68,6 +68,12 @@ impl Script {
                 continue;
             }
 
+            // 跳过注释行（以 // 或 ; 开头）
+            if line.starts_with("//") || line.starts_with(';') {
+                line_idx += 1;
+                continue;
+            }
+
             // 标签定义 (*labelname)
             if let Some(label_name) = line.strip_prefix('*') {
                 let label_name = label_name.trim().to_string();

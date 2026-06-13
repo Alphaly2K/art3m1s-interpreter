@@ -160,6 +160,33 @@ impl Interpreter {
     /// 创建新的解释器实例
     pub fn new(config: InterpreterConfig) -> Self {
         let lua = Lua::new();
+
+        // 注入 Pluto 序列化模块桩实现
+        // Artemis 引擎依赖 Pluto 库来序列化/反序列化 Lua 表，用于存档等功能
+        // 这里提供一个最小桩实现，使 boot 流程能继续
+        let pluto_code = r#"
+            pluto = pluto or {}
+
+            function pluto.persist(refs, tbl)
+                -- 桩实现：返回空字符串表示"无数据"
+                -- 真实实现应该序列化整个表
+                if type(tbl) == "table" then
+                    return ""  -- 空表或无法序列化的表
+                end
+                return tostring(tbl or "")
+            end
+
+            function pluto.unpersist(refs, str)
+                -- 桩实现：返回空表表示"无存档数据"
+                -- 真实实现应该从字符串反序列化表
+                return {}
+            end
+        "#;
+
+        if let Err(e) = lua.load(pluto_code).exec() {
+            eprintln!("警告: 注入 Pluto 桩实现失败: {:?}", e);
+        }
+
         let variables = Arc::new(Mutex::new(VariableStore::new()));
         {
             let mut vars = variables.lock().unwrap();
@@ -585,7 +612,8 @@ impl Interpreter {
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
                     self.current_line = line;
-                    continue;
+                    // 停止 flush,让主循环从新位置开始执行
+                    return Ok(None);
                 }
                 TagResult::Call { file, label, return_line, return_script } => {
                     self.call_stack.push(CallFrame {
@@ -611,7 +639,8 @@ impl Interpreter {
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                         self.current_line = line;
                     }
-                    continue;
+                    // 停止 flush,让主循环执行被调用的脚本
+                    return Ok(None);
                 }
                 TagResult::Return => {
                     if let Some(frame) = self.call_stack.pop() {
@@ -691,6 +720,14 @@ impl Interpreter {
     /// 持续执行直到完成或等待
     pub fn run(&mut self) -> Result<ExecutionResult> {
         self.step()
+    }
+
+    /// 当前行号加一。
+    ///
+    /// 供宿主在 `run()` 返回 `ExecutionResult::Wait` 后调用，越过触发 Wait 的那条指令，
+    /// 以便下一次 `run()` 能从下一指令继续执行（例如用户点击推进的 `[wt]` 等待）。
+    pub fn advance_line(&mut self) {
+        self.current_line = self.current_line.saturating_add(1);
     }
 
     /// 获取变量存储的快照（用于存档）
