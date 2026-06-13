@@ -417,11 +417,20 @@ impl UserData for EngineApi {
             Ok(ctx.callbacks.is_decide())
         });
 
-        // e:getMousePoint()
-        methods.add_method("getMousePoint", |_lua, this, _: ()| {
-            let ctx = this.ctx.lock().unwrap();
-            let (x, y) = ctx.callbacks.get_mouse_point();
-            Ok((x, y))
+        // e:getMousePoint() -> { x=, y= }
+        // 脚本一律按 table 取用（`pos.x` / `pos.y`，见 button.lua slider_clickX、
+        // adv.lua 等数十处）。Lua 里 `local pos = e:getMousePoint()` 只接收首个
+        // 返回值，若返回 tuple 则 pos 是数字，`pos.x` 会触发 index a number 错误
+        // （表现为 config 滑动条点击/拖动报 LuaError、滑条失灵）。
+        methods.add_method("getMousePoint", |lua, this, _: ()| {
+            let (x, y) = {
+                let ctx = this.ctx.lock().unwrap();
+                ctx.callbacks.get_mouse_point()
+            };
+            let t = lua.create_table()?;
+            t.set("x", x)?;
+            t.set("y", y)?;
+            Ok(t)
         });
 
         // e:getTouchCount()
@@ -459,8 +468,27 @@ impl UserData for EngineApi {
             Ok(ctx.callbacks.is_file_exists(&path))
         });
 
-        // e:overrideKey(from, to)
-        methods.add_method("overrideKey", |_lua, this, (from, to): (u32, u32)| {
+        // e:overrideKey{ key=id, status=0 } 或 e:overrideKey(from, to)
+        methods.add_method("overrideKey", |_lua, this, args: mlua::MultiValue| {
+            let mut from: u32 = 0;
+            let mut to: u32 = 0;
+            if let Some(first) = args.iter().next() {
+                match first {
+                    mlua::Value::Table(t) => {
+                        from = t.get("key").unwrap_or(0u32);
+                        to = t.get("status").unwrap_or(0u32);
+                    }
+                    mlua::Value::Integer(n) => {
+                        from = *n as u32;
+                        if args.len() >= 2 {
+                            if let Some(mlua::Value::Integer(n2)) = args.iter().nth(1) {
+                                to = *n2 as u32;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let ctx = this.ctx.lock().unwrap();
             ctx.callbacks.override_key(from, to);
             Ok(())

@@ -14,6 +14,43 @@ use mlua::Lua;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Artemis 兼容：字符串算术强制转换。
+///
+/// 大量游戏脚本（如 mulpos）依赖 `"off" * 5 → 0`、`"100" + 20 → 120` 等行为。
+/// 标准 Lua 5.1 会在非数字字符串上崩溃，而 Artemis 的定制 Lua 运行时会做隐式
+/// tonumber 转换并将无效字符串视为 0。
+const ARITHMETIC_COERCION_CODE: &str = r#"
+    local function _artemis_coerce(a, b, op)
+        local an = tonumber(a)
+        local bn = tonumber(b)
+        if an and bn then
+            return op(an, bn)
+        elseif an then
+            return op(an, 0)
+        elseif bn then
+            return op(0, bn)
+        else
+            return op(0, 0)
+        end
+    end
+    local sm = getmetatable("")
+    if sm then
+        sm.__mul = function(a, b) return _artemis_coerce(a, b, function(x, y) return x * y end) end
+        sm.__add = function(a, b) return _artemis_coerce(a, b, function(x, y) return x + y end) end
+        sm.__sub = function(a, b) return _artemis_coerce(a, b, function(x, y) return x - y end) end
+        sm.__div = function(a, b) return _artemis_coerce(a, b, function(x, y) return x / y end) end
+        sm.__mod = function(a, b)
+            local an = tonumber(a); local bn = tonumber(b)
+            if an and bn then return an % bn else return 0 end
+        end
+        sm.__unm = function(a) return -(tonumber(a) or 0) end
+        sm.__pow = function(a, b)
+            local an = tonumber(a); local bn = tonumber(b)
+            if an and bn then return an ^ bn else return 0 end
+        end
+    end
+"#;
+
 /// 调用栈帧
 #[derive(Debug, Clone)]
 pub struct CallFrame {
@@ -194,6 +231,24 @@ impl Interpreter {
 
         if let Err(e) = lua.load(pluto_code).exec() {
             eprintln!("警告: 注入 Pluto 桩实现失败: {:?}", e);
+        }
+
+        // 注入 Artemis 兼容的算术强制转换：字符串自动转数字，非数字字符串视为 0。
+        // Artemis 引擎使用定制 Lua，允许 "off" * 5 → 0、"100" + 20 → 120 等。
+        // 标准 Lua 5.1 会在这种运算上崩溃，而大量游戏脚本依赖此行为。
+        if let Err(e) = lua.load(ARITHMETIC_COERCION_CODE).exec() {
+            eprintln!("警告: 注入算术强制转换失败: {:?}", e);
+        }
+
+        // 注入探针：注册全局错误追踪器，记录最后发生的 Lua 错误及其调用栈。
+        if let Err(e) = lua.load(r#"
+            __artemis_last_error = nil
+            function __artemis_traceback(msg)
+                __artemis_last_error = msg .. "\n" .. debug.traceback("", 2)
+                return msg
+            end
+        "#).exec() {
+            eprintln!("警告: 注入错误探针失败: {:?}", e);
         }
 
         let variables = Arc::new(Mutex::new(VariableStore::new()));

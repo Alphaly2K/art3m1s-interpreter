@@ -58,7 +58,6 @@ pub fn call_lua_function(
                     current = t.get(part)?;
                 }
                 _ => {
-                    // 函数不存在，跳过
                     return Ok(());
                 }
             }
@@ -72,7 +71,7 @@ pub fn call_lua_function(
         let globals = lua.globals();
         match globals.get::<mlua::Function>(function_name) {
             Ok(f) => f,
-            Err(_) => return Ok(()), // 函数不存在，跳过
+            Err(_) => return Ok(()),
         }
     };
 
@@ -85,16 +84,27 @@ pub fn call_lua_function(
     // 获取 engine 对象
     let engine: mlua::Value = lua.globals().get("__engine")?;
 
-    // 调用函数，传入 engine 对象 + param 表
-    match engine {
+    let result: mlua::Result<()> = match engine {
         mlua::Value::UserData(ud) => {
-            func.call::<()>((ud, param_table))?;
+            func.call((ud, param_table))
         }
         _ => {
-            // engine 对象不存在，只传 param 表
-            func.call::<()>((param_table,))?;
+            func.call((param_table,))
         }
+    };
+
+    // 探针：记录失败调用（设置 ART3M1S_PROBE=1 启用）
+    if result.is_err() && std::env::var("ART3M1S_PROBE").is_ok() {
+        let err_msg = match &result {
+            Err(e) => format!("{e}"),
+            _ => String::new(),
+        };
+        let params_str: Vec<String> = extra_params.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        eprintln!("[PROBE] calllua {function_name}({}) -> ERR: {err_msg}", params_str.join(", "));
     }
 
+    result?;
     Ok(())
 }
