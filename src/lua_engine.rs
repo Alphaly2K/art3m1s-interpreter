@@ -230,9 +230,26 @@ impl UserData for EngineApi {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let tag_name: String = t.get(1).unwrap_or_default();
                 let mut params = HashMap::new();
-                for pair in t.pairs::<String, String>() {
+                // 用 Value 迭代，再手动转 String。mlua 的 `pairs::<String,String>()`
+                // 一旦遇到非字符串值（如 boolean）就会终止迭代，后面的键全部丢失。
+                // Lua 脚本传参经常带布尔字段（se=false 等），必须跳过而非中断。
+                for pair in t.pairs::<mlua::Value, mlua::Value>() {
                     if let Ok((k, v)) = pair {
-                        params.insert(k, v);
+                        let key_str = match k {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            _ => None,
+                        };
+                        let val_str = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let (Some(ks), Some(vs)) = (key_str, val_str) {
+                            params.insert(ks, vs);
+                        }
                     }
                 }
                 // 移除数字键 1 (tag name)

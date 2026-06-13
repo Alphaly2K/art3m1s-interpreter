@@ -377,10 +377,15 @@ pub enum Event {
         label: Option<String>,
         call: bool,
         handler: Option<String>,
+        /// 标签里除已知字段外的其它参数（key、adv、ui、btn 等），
+        /// 由宿主在事件触发时作为 param 传给 Lua 回调。
+        extra_params: std::collections::HashMap<String, String>,
     },
     /// 解除事件处理器 [delon*]
     DelEventHandler {
         event_name: String,
+        /// 指定 key 时只解除该键的处理器；None 时解除整个事件类型的所有处理器。
+        key: Option<String>,
     },
 
     // ── 图层缓动 ──────────────────────────────────────

@@ -20,12 +20,23 @@ macro_rules! event_handler_struct {
                     .unwrap_or(0) != 0;
                 let handler = ctx.instruction.get("handler").map(String::from);
 
+                // 已知字段以外的参数（key、adv、ui、btn 等）透传给宿主，
+                // 宿主在事件触发时作为 Lua 回调的 param 表传回。
+                let known = ["file", "label", "call", "handler"];
+                let mut extra_params = std::collections::HashMap::new();
+                for (k, v) in &ctx.instruction.params {
+                    if !known.contains(&k.as_str()) {
+                        extra_params.insert(k.clone(), v.clone());
+                    }
+                }
+
                 Ok(TagResult::Emit(Event::SetEventHandler {
                     event_name: $event_name.to_string(),
                     file,
                     label,
                     call,
                     handler,
+                    extra_params,
                 }))
             }
         }
@@ -38,9 +49,12 @@ macro_rules! event_handler_del_struct {
         pub struct $name;
 
         impl TagHandler for $name {
-            fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+            fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+                // 带 key 时只解除该键，不带 key 时解除整个事件类型
+                let key = ctx.instruction.get("key").map(String::from);
                 Ok(TagResult::Emit(Event::DelEventHandler {
                     event_name: $event_name.to_string(),
+                    key,
                 }))
             }
         }

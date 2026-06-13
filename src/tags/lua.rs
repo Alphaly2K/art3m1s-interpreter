@@ -39,11 +39,11 @@ impl TagHandler for CallLuaHandler {
     }
 }
 
-/// 调用 Lua 函数，将 engine 对象作为第一个参数传入
+/// 调用 Lua 函数，将 engine 对象作为第一个参数、extra_params 作为第二个参数（Lua 表）传入。
 pub fn call_lua_function(
     lua: &mlua::Lua,
     function_name: &str,
-    _extra_params: &std::collections::HashMap<String, String>,
+    extra_params: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     // 处理嵌套函数名（如 "sv.save"）
     let parts: Vec<&str> = function_name.split('.').collect();
@@ -76,17 +76,23 @@ pub fn call_lua_function(
         }
     };
 
+    // 构造 param 表供 Lua 函数读取
+    let param_table = lua.create_table()?;
+    for (k, v) in extra_params {
+        param_table.set(k.as_str(), v.as_str())?;
+    }
+
     // 获取 engine 对象
     let engine: mlua::Value = lua.globals().get("__engine")?;
 
-    // 调用函数，传入 engine 对象
+    // 调用函数，传入 engine 对象 + param 表
     match engine {
         mlua::Value::UserData(ud) => {
-            func.call::<()>((ud,))?;
+            func.call::<()>((ud, param_table))?;
         }
         _ => {
-            // engine 对象不存在，调用无参数
-            func.call::<()>(())?;
+            // engine 对象不存在，只传 param 表
+            func.call::<()>((param_table,))?;
         }
     }
 

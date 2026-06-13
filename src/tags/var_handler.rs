@@ -268,7 +268,24 @@ pub fn execute_var_system(
         | "get_message_layer_height" | "get_message_layer_line_width"
         | "get_message_tags" | "get_font" | "get_exe_parameter" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            variables.set(name, Value::Int(0));
+            // get_layer_info 需要设置子字段（left/top/width/height），
+            // 否则 Lua 端 e:var("t.ly.width") 会读到 nil。
+            if system == "get_layer_info" {
+                let sw = match variables.get("s.screen_width") {
+                    Some(Value::Int(n)) => *n as f64,
+                    _ => 1280.0,
+                };
+                let sh = match variables.get("s.screen_height") {
+                    Some(Value::Int(n)) => *n as f64,
+                    _ => 720.0,
+                };
+                variables.set(&format!("{}.left", name), Value::Int(0));
+                variables.set(&format!("{}.top", name), Value::Int(0));
+                variables.set(&format!("{}.width", name), Value::Float(sw));
+                variables.set(&format!("{}.height", name), Value::Float(sh));
+            } else {
+                variables.set(name, Value::Int(0));
+            }
         }
 
         "file_crc" | "file_update_time" | "hmac_sha1_base64"

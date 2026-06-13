@@ -197,6 +197,16 @@ impl Interpreter {
             // 对 nil 求值而崩溃，故在此种入合理默认值。
             vars.set("s.engineversion", crate::variable::Value::String("4.00".to_string()));
             vars.set("s.windowsversion", crate::variable::Value::String("10.0".to_string()));
+            // 舞台尺寸供 get_layer_info 等系统查询使用
+            vars.set("s.screen_width", crate::variable::Value::Int(config.stage_width as i64));
+            vars.set("s.screen_height", crate::variable::Value::Int(config.stage_height as i64));
+            // 存档路径 / 数据路径：脚本用 e:var("s.savepath") 读取。
+            // 缺省会让 saveload_init 拼 nil 崩溃。
+            let savepath = config.savepath.clone().unwrap_or_else(|| "save".to_string());
+            vars.set("s.savepath", crate::variable::Value::String(savepath));
+            if let Some(dp) = &config.datapath {
+                vars.set("s.datapath", crate::variable::Value::String(dp.clone()));
+            }
         }
         let mut engine_ctx_inner = EngineContext::new(Box::new(DefaultEngineCallbacks));
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
