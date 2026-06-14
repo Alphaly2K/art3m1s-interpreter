@@ -276,18 +276,77 @@ impl UserData for EngineApi {
         });
 
         // e:enqueueTag{"tagname", param1="val1"}
-        methods.add_method_mut("enqueueTag", |_lua, this, args: mlua::MultiValue| {
+        methods.add_method_mut("enqueueTag", |lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
-                let tag_name: String = t.get(1).unwrap_or_default();
+                let tag_name: String = t.get::<Value>(1).ok().and_then(|v| match v {
+                    Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                    Value::Integer(i) => Some(i.to_string()),
+                    _ => None,
+                }).unwrap_or_default();
                 let mut params = HashMap::new();
-                for pair in t.pairs::<String, String>() {
+                let mut real_param_table: Option<mlua::Table> = None;
+                for pair in t.pairs::<Value, Value>() {
                     if let Ok((k, v)) = pair {
-                        params.insert(k, v);
+                        let key_str = match &k {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            _ => None,
+                        };
+                        if let Some(ks) = key_str {
+                            match v {
+                                Value::Table(vt) if ks == "params" => {
+                                    real_param_table = Some(vt.clone());
+                                }
+                                Value::Table(_) => {} // 其他表值跳过
+                                _ => {
+                                    let val_str = match v {
+                                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                                        Value::Integer(i) => Some(i.to_string()),
+                                        Value::Number(n) => Some(n.to_string()),
+                                        Value::Boolean(b) => Some(b.to_string()),
+                                        _ => None,
+                                    };
+                                    if let Some(vs) = val_str {
+                                        params.insert(ks, vs);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 params.remove("1");
                 let mut ctx = this.ctx.lock().unwrap();
                 ctx.callbacks.enqueue_tag(tag_name.clone(), params.clone());
+                // calllua + 含表 params → 表数据无法序列化进 HashMap，同步执行，
+                // 仿 e:tag 对 var 标签的特判。
+                if tag_name == "calllua" {
+                    if let Some(function_name) = params.get("function").cloned() {
+                        drop(ctx);
+                        if let Some(real_pt) = real_param_table {
+                            let param_table = lua.create_table()
+                                .map_err(|e| mlua::Error::external(e))?;
+                            for (k, v) in &params {
+                                if k != "function" && k != "params" {
+                                    let _ = param_table.set(k.as_str(), v.as_str());
+                                }
+                            }
+                            for pair in real_pt.pairs::<Value, Value>() {
+                                if let Ok((k, v)) = pair {
+                                    let _ = param_table.set(k, v);
+                                }
+                            }
+                            if let Err(e) = crate::tags::call_lua_function_with_table(
+                                lua, &function_name, param_table,
+                            ) {
+                                return Err(mlua::Error::external(format!("calllua 执行失败: {e}")));
+                            }
+                            return Ok(());
+                        }
+                        crate::tags::call_lua_function(lua, &function_name, &params)
+                            .map_err(|e| mlua::Error::external(format!("calllua 执行失败: {e}")))?;
+                        return Ok(());
+                    }
+                }
                 ctx.tag_queue.push((tag_name, params));
             }
             Ok(())
@@ -297,9 +356,23 @@ impl UserData for EngineApi {
         methods.add_method_mut("setEventHandler", |_lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let mut handlers = HashMap::new();
-                for pair in t.pairs::<String, String>() {
+                for pair in t.pairs::<Value, Value>() {
                     if let Ok((k, v)) = pair {
-                        handlers.insert(k.clone(), v.clone());
+                        let key_str = match k {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            _ => None,
+                        };
+                        let val_str = match v {
+                            Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                            Value::Integer(i) => Some(i.to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            Value::Boolean(b) => Some(b.to_string()),
+                            _ => None,
+                        };
+                        if let (Some(ks), Some(vs)) = (key_str, val_str) {
+                            handlers.insert(ks, vs);
+                        }
                     }
                 }
                 let mut ctx = this.ctx.lock().unwrap();

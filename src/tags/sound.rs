@@ -98,7 +98,7 @@ pub struct SeplayHandler;
 
 impl TagHandler for SeplayHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let file = ctx.resolve_param("file")?.as_string();
         let loop_play = ctx.instruction.get("loop")
             .and_then(|v| v.parse::<i32>().ok())
@@ -130,7 +130,7 @@ pub struct SestopHandler;
 
 impl TagHandler for SestopHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let time = ctx.instruction.get("time")
             .and_then(|v| v.parse::<u64>().ok());
         Ok(TagResult::Emit(Event::SeStop { id, fade_time: time }))
@@ -142,7 +142,7 @@ pub struct SefadeHandler;
 
 impl TagHandler for SefadeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let gain = ctx.resolve_param("gain")?.as_int().unwrap_or(0) as i32;
         let time = ctx.instruction.get("time")
             .and_then(|v| v.parse::<u64>().ok())
@@ -156,7 +156,7 @@ pub struct SepanHandler;
 
 impl TagHandler for SepanHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let pan = ctx.resolve_param("pan")?.as_int().unwrap_or(0) as i32;
         Ok(TagResult::Emit(Event::SePan { id, pan }))
     }
@@ -188,7 +188,7 @@ pub struct SetOnSoundFinishHandler;
 
 impl TagHandler for SetOnSoundFinishHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let file = ctx.instruction.get("file").map(String::from);
         let label = ctx.instruction.get("label").map(String::from);
         let call = ctx.instruction.get("call")
@@ -211,7 +211,7 @@ pub struct DelOnSoundFinishHandler;
 
 impl TagHandler for DelOnSoundFinishHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         Ok(TagResult::Emit(Event::SoundFinishHandlerDel { id }))
     }
 }
@@ -221,7 +221,7 @@ pub struct SefadeinHandler;
 
 impl TagHandler for SefadeinHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let time = ctx.instruction.get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
@@ -234,7 +234,7 @@ pub struct SefadeoutHandler;
 
 impl TagHandler for SefadeoutHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let time = ctx.instruction.get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);

@@ -99,6 +99,26 @@ impl<'a> ExpressionEvaluator<'a> {
         }
     }
 
+    /// 解析参数值但保留字符串形态（不做数值强转）。
+    ///
+    /// 用于图层/音轨 **ID** 这类标识符参数。ID 是带点号的层级路径（如 `1.80`、
+    /// `1.0`、`1.60.mw`），不是数值。若走 [`resolve_param`](Self::resolve_param)
+    /// 会被 `parse::<f64>()` 误判为浮点：`"1.80"` → `Float(1.8)` → `"1.8"`、
+    /// `"1.0"` → `"1"`，尾零丢失后 ID 指向了完全不同的节点（`lydel id="1.0"`
+    /// 本意删背景子树，截断成 `"1"` 后把整个根连同消息窗一起删掉）。
+    ///
+    /// 仍支持 `$` 变量引用与单引号字面量；其余情况原样返回字符串。
+    pub fn resolve_param_str(&self, value: &str) -> Result<String> {
+        if value.starts_with('$') {
+            let expr = strip_dollar_signs(&value[1..]);
+            Ok(self.evaluate(&expr)?.as_string())
+        } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+            Ok(value[1..value.len() - 1].to_string())
+        } else {
+            Ok(value.to_string())
+        }
+    }
+
     /// 求值表达式
     pub fn evaluate(&self, expr: &str) -> Result<Value> {
         let mut lexer = Lexer::new(expr);

@@ -81,7 +81,7 @@ pub struct LycHandler;
 
 impl TagHandler for LycHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let file = ctx.resolve_param("file")?.as_string();
 
         Ok(TagResult::Emit(Event::Layer(LayerEvent::Create { id, file })))
@@ -93,7 +93,7 @@ pub struct Lyc2Handler;
 
 impl TagHandler for Lyc2Handler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
         let file = ctx.resolve_param("file")?.as_string();
         let alpha = ctx
             .instruction
@@ -113,7 +113,7 @@ pub struct LydelHandler;
 
 impl TagHandler for LydelHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
 
         Ok(TagResult::Emit(Event::Layer(LayerEvent::Delete { id })))
     }
@@ -124,7 +124,7 @@ pub struct LypropHandler;
 
 impl TagHandler for LypropHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let id = ctx.resolve_param("id")?.as_string();
+        let id = ctx.resolve_param_str("id")?;
 
         // 收集所有属性
         let mut properties = HashMap::new();

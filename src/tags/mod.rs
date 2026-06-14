@@ -85,6 +85,18 @@ impl<'a> ExecutionContext<'a> {
         self.evaluator().resolve_param(value)
     }
 
+    /// 解析 ID 类参数，保留字符串形态（不做数值强转）。
+    ///
+    /// 图层/音轨 ID 是带点号的层级路径（`1.80`、`1.0`），用 [`resolve_param`]
+    /// 会被误判为浮点而丢尾零。见 [`ExpressionEvaluator::resolve_param_str`]。
+    ///
+    /// [`resolve_param`]: Self::resolve_param
+    /// [`ExpressionEvaluator::resolve_param_str`]: crate::expression::ExpressionEvaluator::resolve_param_str
+    pub fn resolve_param_str(&self, key: &str) -> Result<String> {
+        let value = self.instruction.get(key).unwrap_or("");
+        self.evaluator().resolve_param_str(value)
+    }
+
     /// 获取原始参数值
     pub fn get_param(&self, key: &str) -> Option<&str> {
         self.instruction.get(key)

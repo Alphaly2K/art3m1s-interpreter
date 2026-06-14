@@ -829,11 +829,79 @@ impl Interpreter {
                 unreachable!()
             }
         } else {
-            // 未注册的标签，发出自定义事件
+            // 未注册的标签：先尝试 Lua `tags` 表分发（游戏自定义标签，如 `msgon`、
+            // `delay0`、`btn_click` 等）。游戏脚本在 `system/extend/script.lua` 中通过
+            // `tags.<tag> = function(e, p) ... end` 注册这些处理器。
+            //
+            // 注意：不能持有 variables 锁期间调用 Lua（可能回调 e:var 再次锁），
+            // 故仿 calllua 特判——不持锁、直接调用。
+            if let Some(_result) = self.try_dispatch_lua_tag(&instruction.tag, &instruction.params) {
+                return Ok(TagResult::Continue);
+            }
+            // Lua 也未注册，回退：发出自定义事件
             Ok(TagResult::Emit(Event::Custom {
                 tag: instruction.tag.clone(),
                 params: instruction.params.clone(),
             }))
+        }
+    }
+
+    /// 尝试把未注册标签分发给 Lua 全局 `tags` 表中的同名函数。
+    ///
+    /// 游戏自定义标签（如 `msgon`、`delay0`、`btn_click` 等）在
+    /// `system/extend/script.lua` 中以 `tags.<tag> = function(e, p) ... end` 注册。
+    /// 引擎自身不内置这些标签，而是在此处尝试 Lua 分发。
+    ///
+    /// 调用签名与 `calllua` 一致：`func(__engine, param_table)`。
+    /// 返回 `true` 表示找到并执行了 Lua handler，`false` 表示无此 handler。
+    fn try_dispatch_lua_tag(
+        &self,
+        tag: &str,
+        params: &HashMap<String, String>,
+    ) -> Option<()> {
+        // 查找 tags.<tag> 函数，嵌套路径如 tags.msgon 走 lua 递归解析
+        let func: mlua::Function = {
+            let globals = self.lua.globals();
+            let tags: mlua::Table = globals.get("tags").ok()?;
+            let parts: Vec<&str> = tag.split('.').collect();
+            let mut current: mlua::Value = tags.get(parts[0]).ok()?;
+            for &part in &parts[1..] {
+                current = match current {
+                    mlua::Value::Table(t) => t.get(part).ok()?,
+                    _ => return None,
+                };
+            }
+            match current {
+                mlua::Value::Function(f) => f,
+                _ => return None,
+            }
+        };
+
+        // 构造 param 表
+        let param_table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        for (k, v) in params {
+            let _ = param_table.set(k.as_str(), v.as_str());
+        }
+
+        // 获取 engine 对象
+        let engine: mlua::Value = self.lua.globals().get("__engine").ok()?;
+
+        let result: mlua::Result<()> = match engine {
+            mlua::Value::UserData(ud) => func.call((ud, param_table)),
+            _ => func.call((param_table,)),
+        };
+
+        match result {
+            Ok(_) => Some(()),
+            Err(e) => {
+                if std::env::var("ART3M1S_DEBUG").is_ok() {
+                    eprintln!("[lua-tag] {tag} 执行失败: {e}");
+                }
+                None
+            }
         }
     }
 

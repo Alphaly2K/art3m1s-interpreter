@@ -108,3 +108,43 @@ pub fn call_lua_function(
     result?;
     Ok(())
 }
+
+/// 调用 Lua 函数，传入 engine 对象和预构建的 Lua table 作为 params。
+/// 用于 `e:enqueueTag{"calllua", ...}` 等需要保留嵌套表结构的场景。
+pub fn call_lua_function_with_table(
+    lua: &mlua::Lua,
+    function_name: &str,
+    param_table: mlua::Table,
+) -> crate::error::Result<()> {
+    let parts: Vec<&str> = function_name.split('.').collect();
+    let func = if parts.len() > 1 {
+        let mut current: mlua::Value = lua.globals().get(parts[0])?;
+        for &part in &parts[1..] {
+            current = match current {
+                mlua::Value::Table(t) => t.get(part)?,
+                _ => return Ok(()),
+            };
+        }
+        match current {
+            mlua::Value::Function(f) => f,
+            _ => return Ok(()),
+        }
+    } else {
+        match lua.globals().get::<mlua::Function>(function_name) {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        }
+    };
+
+    let engine: mlua::Value = lua.globals().get("__engine")?;
+    let result: mlua::Result<()> = match engine {
+        mlua::Value::UserData(ud) => {
+            func.call((ud, param_table))
+        }
+        _ => {
+            func.call((param_table,))
+        }
+    };
+    result?;
+    Ok(())
+}
