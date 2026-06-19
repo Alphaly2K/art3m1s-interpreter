@@ -325,6 +325,7 @@ impl TagRegistry {
         registry.register("rp", RpHandler);
         registry.register("font", FontHandler);
         registry.register("font_close", FontCloseHandler);
+        registry.register("/font", FontCloseHandler);
         registry.register("fontdefault", FontDefaultHandler);
         registry.register("fontinit", FontInitHandler);
         registry.register("ruby", RubyHandler);
@@ -336,6 +337,7 @@ impl TagRegistry {
         registry.register("glyph", GlyphHandler);
         registry.register("chgmsg", ChgmsgHandler);
         registry.register("chgmsg_close", ChgmsgCloseHandler);
+        registry.register("/chgmsg", ChgmsgCloseHandler);
         registry.register("scetween", ScetweenHandler);
         registry.register("scein", SceinHandler);
         registry.register("sceout", SceoutHandler);

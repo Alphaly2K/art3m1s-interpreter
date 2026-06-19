@@ -539,14 +539,14 @@ impl Interpreter {
                     }
                 }
                 TagResult::Emit(event) => {
-                    let result = (self.callback)(event);
+                    let result = (self.callback)(event.clone());
                     match result {
                         CallbackResult::Continue => {
                             self.current_line += 1;
                             continue;
                         }
                         CallbackResult::Pause => {
-                            return Ok(ExecutionResult::Completed);
+                            return Ok(ExecutionResult::Wait(event));
                         }
                         CallbackResult::Abort => {
                             return Err(Error::Aborted);
@@ -589,7 +589,7 @@ impl Interpreter {
                                     continue;
                                 }
                                 CallbackResult::Pause => {
-                                    return Ok(ExecutionResult::Completed);
+                                    return Ok(ExecutionResult::Wait(event));
                                 }
                                 CallbackResult::Abort => {
                                     return Err(Error::Aborted);

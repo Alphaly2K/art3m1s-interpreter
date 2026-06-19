@@ -259,7 +259,17 @@ pub fn execute_var_system(
 
         "screen_width" | "screen_height" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let value = if system == "screen_width" { 640 } else { 480 };
+            let value = if system == "screen_width" {
+                match variables.get("s.screen_width") {
+                    Some(Value::Int(n)) if *n > 0 => *n,
+                    _ => 640,
+                }
+            } else {
+                match variables.get("s.screen_height") {
+                    Some(Value::Int(n)) if *n > 0 => *n,
+                    _ => 480,
+                }
+            };
             variables.set(name, Value::Int(value));
         }
 
