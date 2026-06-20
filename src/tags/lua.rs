@@ -29,11 +29,7 @@ impl TagHandler for CallLuaHandler {
         }
 
         // 调用 Lua 函数，传入 engine 对象和额外参数
-        call_lua_function(
-            ctx.lua,
-            function_name,
-            &extra_params,
-        )?;
+        call_lua_function(ctx.lua, function_name, &extra_params)?;
 
         Ok(TagResult::Continue)
     }
@@ -85,12 +81,8 @@ pub fn call_lua_function(
     let engine: mlua::Value = lua.globals().get("__engine")?;
 
     let result: mlua::Result<()> = match engine {
-        mlua::Value::UserData(ud) => {
-            func.call((ud, param_table))
-        }
-        _ => {
-            func.call((param_table,))
-        }
+        mlua::Value::UserData(ud) => func.call((ud, param_table)),
+        _ => func.call((param_table,)),
     };
 
     // 探针：记录失败调用（设置 ART3M1S_PROBE=1 启用）
@@ -99,10 +91,14 @@ pub fn call_lua_function(
             Err(e) => format!("{e}"),
             _ => String::new(),
         };
-        let params_str: Vec<String> = extra_params.iter()
+        let params_str: Vec<String> = extra_params
+            .iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
-        eprintln!("[PROBE] calllua {function_name}({}) -> ERR: {err_msg}", params_str.join(", "));
+        eprintln!(
+            "[PROBE] calllua {function_name}({}) -> ERR: {err_msg}",
+            params_str.join(", ")
+        );
     }
 
     result?;
@@ -138,12 +134,8 @@ pub fn call_lua_function_with_table(
 
     let engine: mlua::Value = lua.globals().get("__engine")?;
     let result: mlua::Result<()> = match engine {
-        mlua::Value::UserData(ud) => {
-            func.call((ud, param_table))
-        }
-        _ => {
-            func.call((param_table,))
-        }
+        mlua::Value::UserData(ud) => func.call((ud, param_table)),
+        _ => func.call((param_table,)),
     };
     result?;
     Ok(())

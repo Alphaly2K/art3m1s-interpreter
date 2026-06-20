@@ -12,14 +12,23 @@ pub struct SplayHandler;
 impl TagHandler for SplayHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.resolve_param("file")?.as_string();
-        let loop_play = ctx.instruction.get("loop")
+        let loop_play = ctx
+            .instruction
+            .get("loop")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
-        let gain = ctx.instruction.get("gain")
+            .unwrap_or(1)
+            != 0;
+        let gain = ctx
+            .instruction
+            .get("gain")
             .and_then(|v| v.parse::<i32>().ok());
-        let pan = ctx.instruction.get("pan")
+        let pan = ctx
+            .instruction
+            .get("pan")
             .and_then(|v| v.parse::<i32>().ok());
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok());
 
         Ok(TagResult::Emit(Event::BgmPlay {
@@ -37,7 +46,9 @@ pub struct SstopHandler;
 
 impl TagHandler for SstopHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok());
         Ok(TagResult::Emit(Event::BgmStop { fade_time: time }))
     }
@@ -49,7 +60,9 @@ pub struct SfadeHandler;
 impl TagHandler for SfadeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let gain = ctx.resolve_param("gain")?.as_int().unwrap_or(0) as i32;
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::BgmFade { gain, time }))
@@ -72,14 +85,23 @@ pub struct SxfadeHandler;
 impl TagHandler for SxfadeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.resolve_param("file")?.as_string();
-        let loop_play = ctx.instruction.get("loop")
+        let loop_play = ctx
+            .instruction
+            .get("loop")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
-        let gain = ctx.instruction.get("gain")
+            .unwrap_or(1)
+            != 0;
+        let gain = ctx
+            .instruction
+            .get("gain")
             .and_then(|v| v.parse::<i32>().ok());
-        let pan = ctx.instruction.get("pan")
+        let pan = ctx
+            .instruction
+            .get("pan")
             .and_then(|v| v.parse::<i32>().ok());
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -100,18 +122,30 @@ impl TagHandler for SeplayHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
         let file = ctx.resolve_param("file")?.as_string();
-        let loop_play = ctx.instruction.get("loop")
+        let loop_play = ctx
+            .instruction
+            .get("loop")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
-        let gain = ctx.instruction.get("gain")
+            .unwrap_or(0)
+            != 0;
+        let gain = ctx
+            .instruction
+            .get("gain")
             .and_then(|v| v.parse::<i32>().ok());
-        let pan = ctx.instruction.get("pan")
+        let pan = ctx
+            .instruction
+            .get("pan")
             .and_then(|v| v.parse::<i32>().ok());
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok());
-        let skippable = ctx.instruction.get("skippable")
+        let skippable = ctx
+            .instruction
+            .get("skippable")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
 
         Ok(TagResult::Emit(Event::SePlay {
             id,
@@ -131,9 +165,14 @@ pub struct SestopHandler;
 impl TagHandler for SestopHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok());
-        Ok(TagResult::Emit(Event::SeStop { id, fade_time: time }))
+        Ok(TagResult::Emit(Event::SeStop {
+            id,
+            fade_time: time,
+        }))
     }
 }
 
@@ -144,7 +183,9 @@ impl TagHandler for SefadeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
         let gain = ctx.resolve_param("gain")?.as_int().unwrap_or(0) as i32;
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::SeFade { id, gain, time }))
@@ -168,11 +209,17 @@ pub struct VoiceHandler;
 impl TagHandler for VoiceHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.resolve_param("file")?.as_string();
-        let gain = ctx.instruction.get("gain")
+        let gain = ctx
+            .instruction
+            .get("gain")
             .and_then(|v| v.parse::<i32>().ok());
-        let pan = ctx.instruction.get("pan")
+        let pan = ctx
+            .instruction
+            .get("pan")
             .and_then(|v| v.parse::<i32>().ok());
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok());
         Ok(TagResult::Emit(Event::VoicePlay {
             file,
@@ -191,9 +238,12 @@ impl TagHandler for SetOnSoundFinishHandler {
         let id = ctx.resolve_param_str("id")?;
         let file = ctx.instruction.get("file").map(String::from);
         let label = ctx.instruction.get("label").map(String::from);
-        let call = ctx.instruction.get("call")
+        let call = ctx
+            .instruction
+            .get("call")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
         let handler = ctx.instruction.get("handler").map(String::from);
 
         Ok(TagResult::Emit(Event::SoundFinishHandler {
@@ -222,10 +272,16 @@ pub struct SefadeinHandler;
 impl TagHandler for SefadeinHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        Ok(TagResult::Emit(Event::SeFade { id, gain: 1000, time }))
+        Ok(TagResult::Emit(Event::SeFade {
+            id,
+            gain: 1000,
+            time,
+        }))
     }
 }
 
@@ -235,7 +291,9 @@ pub struct SefadeoutHandler;
 impl TagHandler for SefadeoutHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.resolve_param_str("id")?;
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::SeFade { id, gain: 0, time }))
@@ -247,7 +305,9 @@ pub struct SfadeinHandler;
 
 impl TagHandler for SfadeinHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::BgmFade { gain: 1000, time }))
@@ -259,7 +319,9 @@ pub struct SfadeoutHandler;
 
 impl TagHandler for SfadeoutHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::BgmFade { gain: 0, time }))

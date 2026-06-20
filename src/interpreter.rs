@@ -6,9 +6,7 @@ use crate::error::{Error, Result};
 use crate::event::{CallbackResult, Event, EventCallback, ScriptLoader, default_callback};
 use crate::lua_engine::{DefaultEngineCallbacks, EngineContext};
 use crate::script::{Instruction, Script};
-use crate::tags::{
-    ExecutionContext, TagRegistry, TagResult,
-};
+use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
 use mlua::Lua;
 use mlua::LuaSerdeExt;
@@ -236,7 +234,9 @@ impl Interpreter {
         });
         let decode = lua.create_function(|lua, json_str: mlua::String| {
             let s: String = json_str.to_string_lossy();
-            if s.is_empty() { return Ok(mlua::Value::Table(lua.create_table()?)); }
+            if s.is_empty() {
+                return Ok(mlua::Value::Table(lua.create_table()?));
+            }
             let value: serde_json::Value = serde_json::from_str(&s)
                 .map_err(|e| mlua::Error::external(format!("JSON decode: {e}")))?;
             lua.to_value(&value)
@@ -256,13 +256,18 @@ impl Interpreter {
         }
 
         // 注入探针：注册全局错误追踪器，记录最后发生的 Lua 错误及其调用栈。
-        if let Err(e) = lua.load(r#"
+        if let Err(e) = lua
+            .load(
+                r#"
             __artemis_last_error = nil
             function __artemis_traceback(msg)
                 __artemis_last_error = msg .. "\n" .. debug.traceback("", 2)
                 return msg
             end
-        "#).exec() {
+        "#,
+            )
+            .exec()
+        {
             eprintln!("警告: 注入错误探针失败: {:?}", e);
         }
 
@@ -274,14 +279,29 @@ impl Interpreter {
             // 引擎提供的系统常量（s.*）。它们不是存档状态，而是运行环境信息，脚本启动
             // 时直接读取。缺省会让 init.lua 里的数值比较（如 windowsversion 兼容性检查）
             // 对 nil 求值而崩溃，故在此种入合理默认值。
-            vars.set("s.engineversion", crate::variable::Value::String("4.00".to_string()));
-            vars.set("s.windowsversion", crate::variable::Value::String("10.0".to_string()));
+            vars.set(
+                "s.engineversion",
+                crate::variable::Value::String("4.00".to_string()),
+            );
+            vars.set(
+                "s.windowsversion",
+                crate::variable::Value::String("10.0".to_string()),
+            );
             // 舞台尺寸供 get_layer_info 等系统查询使用
-            vars.set("s.screen_width", crate::variable::Value::Int(config.stage_width as i64));
-            vars.set("s.screen_height", crate::variable::Value::Int(config.stage_height as i64));
+            vars.set(
+                "s.screen_width",
+                crate::variable::Value::Int(config.stage_width as i64),
+            );
+            vars.set(
+                "s.screen_height",
+                crate::variable::Value::Int(config.stage_height as i64),
+            );
             // 存档路径 / 数据路径：脚本用 e:var("s.savepath") 读取。
             // 缺省会让 saveload_init 拼 nil 崩溃。
-            let savepath = config.savepath.clone().unwrap_or_else(|| "save".to_string());
+            let savepath = config
+                .savepath
+                .clone()
+                .unwrap_or_else(|| "save".to_string());
             vars.set("s.savepath", crate::variable::Value::String(savepath));
             if let Some(dp) = &config.datapath {
                 vars.set("s.datapath", crate::variable::Value::String(dp.clone()));
@@ -404,13 +424,14 @@ impl Interpreter {
         }
 
         // 查找标签
-        let script_obj = self.scripts.get(script).ok_or_else(|| {
-            Error::ScriptNotFound(script.to_string())
-        })?;
+        let script_obj = self
+            .scripts
+            .get(script)
+            .ok_or_else(|| Error::ScriptNotFound(script.to_string()))?;
 
-        let line = script_obj.get_label_line(label).ok_or_else(|| {
-            Error::LabelNotFound(label.to_string())
-        })?;
+        let line = script_obj
+            .get_label_line(label)
+            .ok_or_else(|| Error::LabelNotFound(label.to_string()))?;
 
         self.current_script = Some(script.to_string());
         self.current_line = line;
@@ -452,7 +473,9 @@ impl Interpreter {
             if std::env::var("ASB_TRACE_STEP").is_ok() {
                 eprintln!(
                     "[step] {}:{} tag={} fn={:?}",
-                    script_name, self.current_line, instruction.tag,
+                    script_name,
+                    self.current_line,
+                    instruction.tag,
                     instruction.get("function")
                 );
             }
@@ -470,7 +493,10 @@ impl Interpreter {
                         continue;
                     }
                     CallbackResult::Pause => {
-                        return Ok(ExecutionResult::Wait(Event::ScenarioText { content: text, inline: false }));
+                        return Ok(ExecutionResult::Wait(Event::ScenarioText {
+                            content: text,
+                            inline: false,
+                        }));
                     }
                     CallbackResult::Abort => {
                         return Err(Error::Aborted);
@@ -501,7 +527,12 @@ impl Interpreter {
                     self.current_line = line;
                     continue;
                 }
-                TagResult::Call { file, label, return_line, return_script } => {
+                TagResult::Call {
+                    file,
+                    label,
+                    return_line,
+                    return_script,
+                } => {
                     // 压入调用栈
                     self.call_stack.push(CallFrame {
                         script: return_script.clone(),
@@ -512,9 +543,12 @@ impl Interpreter {
                     if let Some(target_file) = file {
                         // 跨脚本调用
                         self.load_external_script(&target_file)?;
-                        let target_script = self.scripts.get(&target_file)
+                        let target_script = self
+                            .scripts
+                            .get(&target_file)
                             .ok_or_else(|| Error::ScriptNotFound(target_file.clone()))?;
-                        let target_line = target_script.get_label_line(&label)
+                        let target_line = target_script
+                            .get_label_line(&label)
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
 
                         self.current_script = Some(target_file.clone());
@@ -523,7 +557,8 @@ impl Interpreter {
                     } else {
                         // 同脚本调用
                         let script = self.scripts.get(&return_script).unwrap();
-                        let line = script.get_label_line(&label)
+                        let line = script
+                            .get_label_line(&label)
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                         self.current_line = line;
                         continue;
@@ -623,23 +658,33 @@ impl Interpreter {
                             self.current_line += 1;
                             // 将结果返回给外层处理
                             match other {
-                                TagResult::Call { file, label, return_line, return_script } => {
+                                TagResult::Call {
+                                    file,
+                                    label,
+                                    return_line,
+                                    return_script,
+                                } => {
                                     self.call_stack.push(CallFrame {
                                         script: return_script,
                                         return_line,
                                     });
                                     if let Some(target_file) = file {
                                         self.load_external_script(&target_file)?;
-                                        let target_script = self.scripts.get(&target_file)
-                                            .ok_or_else(|| Error::ScriptNotFound(target_file.clone()))?;
-                                        let target_line = target_script.get_label_line(&label)
+                                        let target_script =
+                                            self.scripts.get(&target_file).ok_or_else(|| {
+                                                Error::ScriptNotFound(target_file.clone())
+                                            })?;
+                                        let target_line = target_script
+                                            .get_label_line(&label)
                                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                                         self.current_script = Some(target_file);
                                         self.current_line = target_line;
                                     } else {
-                                        let script_name = self.current_script.clone().unwrap_or_default();
+                                        let script_name =
+                                            self.current_script.clone().unwrap_or_default();
                                         let script = self.scripts.get(&script_name).unwrap();
-                                        let line = script.get_label_line(&label)
+                                        let line = script
+                                            .get_label_line(&label)
                                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                                         self.current_line = line;
                                     }
@@ -735,7 +780,12 @@ impl Interpreter {
                     // 被延迟到 jump 后的脚本上下文才执行，导致 dialog 返回值丢失）。
                     continue;
                 }
-                TagResult::Call { file, label, return_line: _, return_script } => {
+                TagResult::Call {
+                    file,
+                    label,
+                    return_line: _,
+                    return_script,
+                } => {
                     // 排队 call 与内联 call 的返回语义不同：
                     // 内联 call 时 `self.current_line` 指向 call 指令本身，handler
                     // 用 `current_line + 1` 让 return 落到下一条指令是对的。
@@ -853,7 +903,8 @@ impl Interpreter {
             //
             // 注意：不能持有 variables 锁期间调用 Lua（可能回调 e:var 再次锁），
             // 故仿 calllua 特判——不持锁、直接调用。
-            if let Some(_result) = self.try_dispatch_lua_tag(&instruction.tag, &instruction.params) {
+            if let Some(_result) = self.try_dispatch_lua_tag(&instruction.tag, &instruction.params)
+            {
                 return Ok(TagResult::Continue);
             }
             // Lua 也未注册，回退：发出自定义事件
@@ -872,11 +923,7 @@ impl Interpreter {
     ///
     /// 调用签名与 `calllua` 一致：`func(__engine, param_table)`。
     /// 返回 `true` 表示找到并执行了 Lua handler，`false` 表示无此 handler。
-    fn try_dispatch_lua_tag(
-        &self,
-        tag: &str,
-        params: &HashMap<String, String>,
-    ) -> Option<()> {
+    fn try_dispatch_lua_tag(&self, tag: &str, params: &HashMap<String, String>) -> Option<()> {
         // 查找 tags.<tag> 函数，嵌套路径如 tags.msgon 走 lua 递归解析
         let func: mlua::Function = {
             let globals = self.lua.globals();
@@ -1013,7 +1060,12 @@ impl Interpreter {
 
     /// 加载存档后恢复解释器执行位置。
     /// `jump_target` 为脚本内标签名（如 `"*title"`），解释器会从该标签继续执行。
-    pub fn restore_position(&mut self, script: &str, line: usize, stack: Vec<CallFrame>) -> Result<()> {
+    pub fn restore_position(
+        &mut self,
+        script: &str,
+        line: usize,
+        stack: Vec<CallFrame>,
+    ) -> Result<()> {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack = stack;
@@ -1038,7 +1090,10 @@ impl Interpreter {
     }
 
     /// 设置事件回调
-    pub fn set_callback<F: FnMut(Event) -> CallbackResult + Send + Sync + 'static>(&mut self, callback: F) {
+    pub fn set_callback<F: FnMut(Event) -> CallbackResult + Send + Sync + 'static>(
+        &mut self,
+        callback: F,
+    ) {
         self.callback = Box::new(callback);
     }
 

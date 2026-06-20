@@ -116,16 +116,11 @@ pub enum Event {
 
     // ── 剧情文本事件 ──────────────────────────────────────
     /// 剧情文本
-    ScenarioText {
-        content: String,
-        inline: bool,
-    },
+    ScenarioText { content: String, inline: bool },
     /// 换行 [rt]
     LineBreak,
     /// 分页 [rp]
-    PageBreak {
-        backlog: Option<i32>,
-    },
+    PageBreak { backlog: Option<i32> },
     /// 字体设置 [font]
     FontSettings(HashMap<String, String>),
     /// 回退字体 [font_close]
@@ -135,9 +130,7 @@ pub enum Event {
     /// 初始化字体 [fontinit]
     FontInit,
     /// 开始注音 [ruby]
-    RubyStart {
-        text: String,
-    },
+    RubyStart { text: String },
     /// 结束注音 [/ruby]
     RubyEnd,
     /// 开始链接 [link]
@@ -156,10 +149,7 @@ pub enum Event {
     /// 点击等待图标 [glyph]
     GlyphConfig(HashMap<String, String>),
     /// 切换消息层 [chgmsg]
-    MessageLayerSwitch {
-        id: Option<String>,
-        layered: i32,
-    },
+    MessageLayerSwitch { id: Option<String>, layered: i32 },
     /// 回退消息层 [chgmsg_close]
     MessageLayerPop,
     /// 文本动画 [scetween]
@@ -169,43 +159,23 @@ pub enum Event {
     /// 场景退出 [sceout]
     SceneOut,
     /// 自动模式配置 [automode]
-    AutoModeConfig {
-        allow: bool,
-        layer: Option<String>,
-    },
+    AutoModeConfig { allow: bool, layer: Option<String> },
     /// 跳过配置 [skip]
-    SkipConfig {
-        allow: bool,
-        skip_unread: bool,
-    },
+    SkipConfig { allow: bool, skip_unread: bool },
     /// 历史配置 [backlog]
-    BacklogConfig {
-        allow: bool,
-    },
+    BacklogConfig { allow: bool },
     /// 隐藏配置 [hide]
-    HideConfig {
-        allow: bool,
-    },
+    HideConfig { allow: bool },
     /// 已读判定 [alreadyread]
-    AlreadyReadConfig {
-        mode: i32,
-    },
+    AlreadyReadConfig { mode: i32 },
     /// 历史写入 [writebacklog]
-    WriteBacklogConfig {
-        enable: bool,
-    },
+    WriteBacklogConfig { enable: bool },
     /// 缩进设置 [indent]
-    IndentConfig {
-        value: String,
-    },
+    IndentConfig { value: String },
     /// 禁则处理 [prohibit]
-    ProhibitConfig {
-        value: String,
-    },
+    ProhibitConfig { value: String },
     /// 单词部分字符 [wordparts]
-    WordpartsConfig {
-        value: String,
-    },
+    WordpartsConfig { value: String },
 
     // ── 音频事件 ──────────────────────────────────────
     /// 播放 BGM [splay]
@@ -217,18 +187,11 @@ pub enum Event {
         fade_time: Option<u64>,
     },
     /// 停止 BGM [sstop]
-    BgmStop {
-        fade_time: Option<u64>,
-    },
+    BgmStop { fade_time: Option<u64> },
     /// BGM 音量渐变 [sfade]
-    BgmFade {
-        gain: i32,
-        time: u64,
-    },
+    BgmFade { gain: i32, time: u64 },
     /// BGM 声像 [span]
-    BgmPan {
-        pan: i32,
-    },
+    BgmPan { pan: i32 },
     /// BGM 交叉淡入 [sxfade]
     BgmCrossFade {
         file: String,
@@ -248,21 +211,11 @@ pub enum Event {
         skippable: bool,
     },
     /// 停止 SE [sestop]
-    SeStop {
-        id: String,
-        fade_time: Option<u64>,
-    },
+    SeStop { id: String, fade_time: Option<u64> },
     /// SE 音量渐变 [sefade]
-    SeFade {
-        id: String,
-        gain: i32,
-        time: u64,
-    },
+    SeFade { id: String, gain: i32, time: u64 },
     /// SE 声像 [sepan]
-    SePan {
-        id: String,
-        pan: i32,
-    },
+    SePan { id: String, pan: i32 },
     /// 语音播放 [voice]
     VoicePlay {
         file: String,
@@ -279,20 +232,13 @@ pub enum Event {
         handler: Option<String>,
     },
     /// 解除音效完成事件处理器 [delonsoundfinish]
-    SoundFinishHandlerDel {
-        id: String,
-    },
+    SoundFinishHandlerDel { id: String },
 
     // ── 系统操作事件 ──────────────────────────────────────
     /// 执行用户操作 [exec]
-    Exec {
-        command: String,
-        mode: Option<i32>,
-    },
+    Exec { command: String, mode: Option<i32> },
     /// 存档 [save]
-    SaveGame {
-        file: String,
-    },
+    SaveGame { file: String },
     /// 读档 [load]
     LoadGame {
         file: String,
@@ -304,16 +250,11 @@ pub enum Event {
         level: Option<i32>,
     },
     /// 调试输出 [debugprint]
-    DebugPrint {
-        level: i32,
-        data: String,
-    },
+    DebugPrint { level: i32, data: String },
     /// 调试重载 [debugreload]
     DebugReload,
     /// 窗口标题 [caption]
-    Caption {
-        data: String,
-    },
+    Caption { data: String },
     /// 鼠标设置 [mouse]
     MouseConfig {
         left: Option<i32>,
@@ -331,38 +272,24 @@ pub enum Event {
         target: Option<String>,
     },
     /// HTTP GET [httpget]
-    HttpGet {
-        url: String,
-    },
+    HttpGet { url: String },
     /// HTTP POST [httppost]
     HttpPost {
         url: String,
         params: HashMap<String, String>,
     },
     /// 打开浏览器 [openbrowser]
-    OpenBrowser {
-        url: String,
-    },
+    OpenBrowser { url: String },
     /// 自动存档配置 [autosave]
-    AutoSaveConfig {
-        allow: bool,
-    },
+    AutoSaveConfig { allow: bool },
     /// 紧急回避配置 [avoid]
-    AvoidConfig {
-        allow: bool,
-    },
+    AvoidConfig { allow: bool },
     /// 振动 [vibrate]
-    Vibrate {
-        time: u64,
-    },
+    Vibrate { time: u64 },
     /// 状态栏 [statusbar]
-    StatusBar {
-        visible: bool,
-    },
+    StatusBar { visible: bool },
     /// 应用内购买 [purchase]
-    Purchase {
-        item: String,
-    },
+    Purchase { item: String },
     /// 调用原生代码 [callnative]
     CallNative {
         function: String,
@@ -408,9 +335,7 @@ pub enum Event {
         handler_handler: Option<String>,
     },
     /// 强制完成图层缓动 [lytweendel]
-    LayerTweenDelete {
-        id: String,
-    },
+    LayerTweenDelete { id: String },
     /// 缓动序列开始 [tweenset]
     TweenSetStart,
     /// 缓动序列结束 [/tweenset]
@@ -432,10 +357,7 @@ pub enum Event {
         extra_params: std::collections::HashMap<String, String>,
     },
     /// 图层重命名 [lyrename]
-    LayerRename {
-        id: String,
-        to: String,
-    },
+    LayerRename { id: String, to: String },
     /// 图层图像编辑 [lyedit]
     LayerEdit {
         id: String,
@@ -446,9 +368,7 @@ pub enum Event {
         top: Option<i32>,
     },
     /// 图层拖动 [lydrag]
-    LayerDrag {
-        id: String,
-    },
+    LayerDrag { id: String },
 
     // ── 动画/视频 ──────────────────────────────────────
     /// 帧动画 [anime]
@@ -492,20 +412,13 @@ pub enum Event {
     /// 截图 [takess]
     TakeScreenshot,
     /// 保存截图 [savess]
-    SaveScreenshot {
-        file: String,
-    },
+    SaveScreenshot { file: String },
 
     // ── 脚本/宏 ──────────────────────────────────────
     /// 右键单击脚本 [rclick]
-    RightClickConfig {
-        allow: bool,
-        file: Option<String>,
-    },
+    RightClickConfig { allow: bool, file: Option<String> },
     /// 解除宏定义文件 [macrodel]
-    MacroDel {
-        file: String,
-    },
+    MacroDel { file: String },
 
     /// 自定义事件（未识别的标签）
     Custom {
@@ -529,10 +442,7 @@ pub struct TransitionEvent {
 #[derive(Debug, Clone)]
 pub enum LayerEvent {
     /// 创建图层
-    Create {
-        id: String,
-        file: String,
-    },
+    Create { id: String, file: String },
     /// 创建图层（变体）
     Create2 {
         id: String,
@@ -540,9 +450,7 @@ pub enum LayerEvent {
         alpha: Option<u8>,
     },
     /// 删除图层
-    Delete {
-        id: String,
-    },
+    Delete { id: String },
     /// 设置图层属性
     SetProperty {
         id: String,

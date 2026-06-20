@@ -17,17 +17,38 @@ impl TagHandler for LytweenHandler {
         let from = ctx.instruction.get("from").map(|s| s.to_string());
         let to = ctx.instruction.get("to").map(|s| s.to_string());
         let ease = ctx.instruction.get("ease").map(|s| s.to_string());
-        let time = ctx.instruction.get("time").and_then(|s| s.parse::<u64>().ok());
-        let delay = ctx.instruction.get("delay").and_then(|s| s.parse::<u64>().ok());
-        let loop_count = ctx.instruction.get("loop").and_then(|s| s.parse::<i32>().ok());
-        let yoyo = ctx.instruction.get("yoyo").and_then(|s| s.parse::<i32>().ok());
-        let loop_delay = ctx.instruction.get("loopdelay").and_then(|s| s.parse::<u64>().ok());
-        let sync = ctx.instruction.get("sync")
+        let time = ctx
+            .instruction
+            .get("time")
+            .and_then(|s| s.parse::<u64>().ok());
+        let delay = ctx
+            .instruction
+            .get("delay")
+            .and_then(|s| s.parse::<u64>().ok());
+        let loop_count = ctx
+            .instruction
+            .get("loop")
+            .and_then(|s| s.parse::<i32>().ok());
+        let yoyo = ctx
+            .instruction
+            .get("yoyo")
+            .and_then(|s| s.parse::<i32>().ok());
+        let loop_delay = ctx
+            .instruction
+            .get("loopdelay")
+            .and_then(|s| s.parse::<u64>().ok());
+        let sync = ctx
+            .instruction
+            .get("sync")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
-        let delete = ctx.instruction.get("delete")
+            .unwrap_or(0)
+            != 0;
+        let delete = ctx
+            .instruction
+            .get("delete")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
         let handler_file = ctx.instruction.get("file").map(|s| s.to_string());
         let handler_label = ctx.instruction.get("label").map(|s| s.to_string());
         let handler_handler = ctx.instruction.get("handler").map(|s| s.to_string());
@@ -90,19 +111,33 @@ impl TagHandler for LyeventHandler {
         let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
         let file = ctx.instruction.get("file").map(|s| s.to_string());
         let label = ctx.instruction.get("label").map(|s| s.to_string());
-        let call = ctx.instruction.get("call")
+        let call = ctx
+            .instruction
+            .get("call")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
         let handler = ctx.instruction.get("handler").map(|s| s.to_string());
-        let penetration = ctx.instruction.get("penetration")
+        let penetration = ctx
+            .instruction
+            .get("penetration")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
 
         // 把已知字段以外的参数收集为 extra_params（function、name、key、se 等）。
         // 这些会在事件触发时由宿主原样塞进 handler 标签（如 calllua）的参数表，
         // 引擎不解释其语义。
-        let known = ["id", "type", "mode", "file", "label", "call", "handler",
-                     "penetration"];
+        let known = [
+            "id",
+            "type",
+            "mode",
+            "file",
+            "label",
+            "call",
+            "handler",
+            "penetration",
+        ];
         let mut extra_params = std::collections::HashMap::new();
         for (k, v) in ctx.instruction.params.iter() {
             if !known.contains(&k.as_str()) {
@@ -144,8 +179,14 @@ impl TagHandler for LyeditHandler {
         let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
         let color = ctx.instruction.get("color").map(|s| s.to_string());
         let file = ctx.instruction.get("file").map(|s| s.to_string());
-        let left = ctx.instruction.get("left").and_then(|s| s.parse::<i32>().ok());
-        let top = ctx.instruction.get("top").and_then(|s| s.parse::<i32>().ok());
+        let left = ctx
+            .instruction
+            .get("left")
+            .and_then(|s| s.parse::<i32>().ok());
+        let top = ctx
+            .instruction
+            .get("top")
+            .and_then(|s| s.parse::<i32>().ok());
 
         Ok(TagResult::Emit(Event::LayerEdit {
             id,
@@ -177,13 +218,34 @@ impl TagHandler for AnimeHandler {
         let mode = ctx.instruction.get("mode").unwrap_or("").to_string();
         let file = ctx.instruction.get("file").map(|s| s.to_string());
         let mask = ctx.instruction.get("mask").map(|s| s.to_string());
-        let time = ctx.instruction.get("time").and_then(|s| s.parse::<u64>().ok());
-        let loop_count = ctx.instruction.get("loop").and_then(|s| s.parse::<i32>().ok());
+        let time = ctx
+            .instruction
+            .get("time")
+            .and_then(|s| s.parse::<u64>().ok());
+        let loop_count = ctx
+            .instruction
+            .get("loop")
+            .and_then(|s| s.parse::<i32>().ok());
 
         let mut props = HashMap::new();
-        for key in &["left", "top", "alpha", "anchorx", "anchory", "xscale", "yscale",
-                     "rotate", "reversex", "reversey", "clip", "layermode", "negative",
-                     "grayscale", "colormultiply", "visible"] {
+        for key in &[
+            "left",
+            "top",
+            "alpha",
+            "anchorx",
+            "anchory",
+            "xscale",
+            "yscale",
+            "rotate",
+            "reversex",
+            "reversey",
+            "clip",
+            "layermode",
+            "negative",
+            "grayscale",
+            "colormultiply",
+            "visible",
+        ] {
             if let Some(val) = ctx.instruction.get(key) {
                 props.insert(key.to_string(), val.to_string());
             }
@@ -208,12 +270,18 @@ impl TagHandler for VideoHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.instruction.get("id").map(|s| s.to_string());
         let file = ctx.instruction.get("file").unwrap_or("").to_string();
-        let skip = ctx.instruction.get("skip")
+        let skip = ctx
+            .instruction
+            .get("skip")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
-        let loop_play = ctx.instruction.get("loop")
+            .unwrap_or(1)
+            != 0;
+        let loop_play = ctx
+            .instruction
+            .get("loop")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
 
         Ok(TagResult::Emit(Event::VideoPlay {
             id,
@@ -231,9 +299,12 @@ impl TagHandler for SetOnVideofinishHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.instruction.get("file").map(|s| s.to_string());
         let label = ctx.instruction.get("label").map(|s| s.to_string());
-        let call = ctx.instruction.get("call")
+        let call = ctx
+            .instruction
+            .get("call")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0) != 0;
+            .unwrap_or(0)
+            != 0;
         let handler = ctx.instruction.get("handler").map(|s| s.to_string());
 
         Ok(TagResult::Emit(Event::VideoFinishHandler {
@@ -259,13 +330,23 @@ pub struct TransHandler;
 
 impl TagHandler for TransHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let trans_type = ctx.instruction.get("type")
+        let trans_type = ctx
+            .instruction
+            .get("type")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(1);
-        let time = ctx.instruction.get("time").and_then(|s| s.parse::<u64>().ok());
+        let time = ctx
+            .instruction
+            .get("time")
+            .and_then(|s| s.parse::<u64>().ok());
         let rule = ctx.instruction.get("rule").map(|s| s.to_string());
-        let vague = ctx.instruction.get("vague").and_then(|s| s.parse::<i32>().ok());
-        let input = ctx.instruction.get("input")
+        let vague = ctx
+            .instruction
+            .get("vague")
+            .and_then(|s| s.parse::<i32>().ok());
+        let input = ctx
+            .instruction
+            .get("input")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(1);
 
@@ -312,9 +393,12 @@ pub struct RclickHandler;
 
 impl TagHandler for RclickHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
+            .unwrap_or(1)
+            != 0;
         let file = ctx.instruction.get("file").map(|s| s.to_string());
 
         Ok(TagResult::Emit(Event::RightClickConfig { allow, file }))

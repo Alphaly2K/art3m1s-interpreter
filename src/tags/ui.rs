@@ -4,9 +4,7 @@
 
 use super::{ExecutionContext, TagHandler, TagResult};
 use crate::error::Result;
-use crate::event::{
-    Event, LayerEvent, LoadMaskAction, SystemUiAction, TransitionEvent,
-};
+use crate::event::{Event, LayerEvent, LoadMaskAction, SystemUiAction, TransitionEvent};
 use std::collections::HashMap;
 
 /// [uitrans] UI 转场标签
@@ -84,7 +82,10 @@ impl TagHandler for LycHandler {
         let id = ctx.resolve_param_str("id")?;
         let file = ctx.resolve_param("file")?.as_string();
 
-        Ok(TagResult::Emit(Event::Layer(LayerEvent::Create { id, file })))
+        Ok(TagResult::Emit(Event::Layer(LayerEvent::Create {
+            id,
+            file,
+        })))
     }
 }
 

@@ -142,22 +142,46 @@ impl EngineCallbacks for DefaultEngineCallbacks {
     fn debug(&self, _level: i32, _data: &str, _raw: bool) {}
     fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
     fn set_event_handler(&self, _handlers: HashMap<String, String>) {}
-    fn get_script_status(&self) -> u8 { 0 }
-    fn is_key_down(&self, _key_id: u32) -> bool { false }
-    fn is_key_down_edge(&self, _key_id: u32) -> bool { false }
-    fn is_key_up_edge(&self, _key_id: u32) -> bool { false }
-    fn is_decide(&self) -> bool { false }
-    fn get_mouse_point(&self) -> (i32, i32) { (0, 0) }
-    fn get_touch_count(&self) -> u32 { 0 }
-    fn get_touch_point(&self, _index: u32) -> (i32, i32) { (0, 0) }
-    fn is_file_exists(&self, _path: &str) -> bool { false }
+    fn get_script_status(&self) -> u8 {
+        0
+    }
+    fn is_key_down(&self, _key_id: u32) -> bool {
+        false
+    }
+    fn is_key_down_edge(&self, _key_id: u32) -> bool {
+        false
+    }
+    fn is_key_up_edge(&self, _key_id: u32) -> bool {
+        false
+    }
+    fn is_decide(&self) -> bool {
+        false
+    }
+    fn get_mouse_point(&self) -> (i32, i32) {
+        (0, 0)
+    }
+    fn get_touch_count(&self) -> u32 {
+        0
+    }
+    fn get_touch_point(&self, _index: u32) -> (i32, i32) {
+        (0, 0)
+    }
+    fn is_file_exists(&self, _path: &str) -> bool {
+        false
+    }
     fn file_operation(&self, _command: &str, _params: HashMap<String, String>) {}
     fn include(&self, _path: &str) {}
     fn override_key(&self, _from: u32, _to: u32) {}
     fn set_flick_sensitivity(&self, _sensitivity: f64) {}
-    fn get_script_block(&self) -> HashMap<String, String> { HashMap::new() }
-    fn get_script_stack(&self) -> Vec<HashMap<String, String>> { vec![] }
-    fn get_script_wait_reason(&self) -> u8 { 0 }
+    fn get_script_block(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
+    fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+        vec![]
+    }
+    fn get_script_wait_reason(&self) -> u8 {
+        0
+    }
 }
 
 /// 共享的引擎上下文
@@ -272,7 +296,8 @@ impl UserData for EngineApi {
                 if tag_name == "var" {
                     if let Some(vars) = &ctx.variables {
                         let mut store = vars.lock().unwrap();
-                        if let Err(e) = crate::tags::var_handler::apply_var_tag(&params, &mut store) {
+                        if let Err(e) = crate::tags::var_handler::apply_var_tag(&params, &mut store)
+                        {
                             return Err(mlua::Error::external(format!("var 标签执行失败: {e}")));
                         }
                     }
@@ -286,11 +311,15 @@ impl UserData for EngineApi {
         // e:enqueueTag{"tagname", param1="val1"}
         methods.add_method("enqueueTag", |lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
-                let tag_name: String = t.get::<Value>(1).ok().and_then(|v| match v {
-                    Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-                    Value::Integer(i) => Some(i.to_string()),
-                    _ => None,
-                }).unwrap_or_default();
+                let tag_name: String = t
+                    .get::<Value>(1)
+                    .ok()
+                    .and_then(|v| match v {
+                        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+                        Value::Integer(i) => Some(i.to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 let mut params = HashMap::new();
                 let mut real_param_table: Option<mlua::Table> = None;
                 for pair in t.pairs::<Value, Value>() {
@@ -331,8 +360,8 @@ impl UserData for EngineApi {
                     if let Some(function_name) = params.get("function").cloned() {
                         drop(ctx);
                         if let Some(real_pt) = real_param_table {
-                            let param_table = lua.create_table()
-                                .map_err(|e| mlua::Error::external(e))?;
+                            let param_table =
+                                lua.create_table().map_err(|e| mlua::Error::external(e))?;
                             for (k, v) in &params {
                                 if k != "function" && k != "params" {
                                     let _ = param_table.set(k.as_str(), v.as_str());
@@ -344,9 +373,13 @@ impl UserData for EngineApi {
                                 }
                             }
                             if let Err(e) = crate::tags::call_lua_function_with_table(
-                                lua, &function_name, param_table,
+                                lua,
+                                &function_name,
+                                param_table,
                             ) {
-                                return Err(mlua::Error::external(format!("calllua 执行失败: {e}")));
+                                return Err(mlua::Error::external(format!(
+                                    "calllua 执行失败: {e}"
+                                )));
                             }
                             return Ok(());
                         }
@@ -397,14 +430,10 @@ impl UserData for EngineApi {
         });
 
         // e:random()
-        methods.add_method("random", |_lua, _this, _: ()| {
-            Ok(rand_i64())
-        });
+        methods.add_method("random", |_lua, _this, _: ()| Ok(rand_i64()));
 
         // e:now()
-        methods.add_method("now", |_lua, _this, _: ()| {
-            Ok(now_millis())
-        });
+        methods.add_method("now", |_lua, _this, _: ()| Ok(now_millis()));
 
         // e:include("path")
         //
@@ -679,7 +708,8 @@ impl UserData for EngineApi {
         // e:exit() — request game exit
         methods.add_method("exit", |_lua, this, _: ()| {
             let mut ctx = this.ctx.lock().unwrap();
-            ctx.tag_queue.push(("exit".to_string(), std::collections::HashMap::new()));
+            ctx.tag_queue
+                .push(("exit".to_string(), std::collections::HashMap::new()));
             Ok(())
         });
 

@@ -15,7 +15,10 @@ use std::collections::HashMap;
 /// 否则读到 nil。把落值动作放在入队/执行的同一处，即可消除该时序窗口。
 ///
 /// 表达式参数（system 变体的 source/string/... 以及简单形式的 data）在此就地解析。
-pub fn apply_var_tag(params: &HashMap<String, String>, variables: &mut VariableStore) -> Result<()> {
+pub fn apply_var_tag(
+    params: &HashMap<String, String>,
+    variables: &mut VariableStore,
+) -> Result<()> {
     if let Some(system) = params.get("system") {
         let system = system.clone();
 
@@ -52,9 +55,7 @@ pub fn execute_var_system(
     variables: &mut VariableStore,
 ) -> Result<()> {
     // 辅助函数：获取已解析的参数值
-    let get_resolved = |key: &str| -> Option<&Value> {
-        resolved.get(key)
-    };
+    let get_resolved = |key: &str| -> Option<&Value> { resolved.get(key) };
 
     match system {
         "var_exist" => {
@@ -89,7 +90,9 @@ pub fn execute_var_system(
         "random" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             let min = get_resolved("min").and_then(|v| v.as_int()).unwrap_or(0);
-            let max = get_resolved("max").and_then(|v| v.as_int()).unwrap_or(i64::MAX);
+            let max = get_resolved("max")
+                .and_then(|v| v.as_int())
+                .unwrap_or(i64::MAX);
 
             let result = if max > min {
                 let seed = std::time::SystemTime::now()
@@ -97,7 +100,8 @@ pub fn execute_var_system(
                     .map(|d| d.as_nanos() as i64)
                     .unwrap_or(0);
                 let range = (max - min + 1) as u64;
-                let rand_val = ((seed.wrapping_mul(6364136223846793005).wrapping_add(1)) as u64) % range;
+                let rand_val =
+                    ((seed.wrapping_mul(6364136223846793005).wrapping_add(1)) as u64) % range;
                 min + rand_val as i64
             } else {
                 min
@@ -107,7 +111,9 @@ pub fn execute_var_system(
 
         "length" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             let mode = params.get("mode").map(|s| s.as_str()).unwrap_or("0");
 
             let len = if mode == "1" {
@@ -120,8 +126,12 @@ pub fn execute_var_system(
 
         "find" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
-            let string = get_resolved("string").map(|v| v.as_string()).unwrap_or_default();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
+            let string = get_resolved("string")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
 
             let pos = source.find(&string).map(|p| p as i64).unwrap_or(-1);
             variables.set(name, Value::Int(pos));
@@ -129,24 +139,37 @@ pub fn execute_var_system(
 
         "substr" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
-            let position = get_resolved("position").and_then(|v| v.as_int()).unwrap_or(0) as usize;
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
+            let position = get_resolved("position")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as usize;
             let length = get_resolved("length")
                 .and_then(|v| v.as_int())
                 .unwrap_or(source.len() as i64) as usize;
             let mode = params.get("mode").map(|s| s.as_str()).unwrap_or("0");
 
             let result = if mode == "1" {
-                source.chars().skip(position).take(length).collect::<String>()
+                source
+                    .chars()
+                    .skip(position)
+                    .take(length)
+                    .collect::<String>()
             } else {
-                source.get(position..position + length).unwrap_or("").to_string()
+                source
+                    .get(position..position + length)
+                    .unwrap_or("")
+                    .to_string()
             };
             variables.set(name, Value::String(result));
         }
 
         "explode" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             let delimiter = params.get("delimiter").map(|s| s.as_str()).unwrap_or(",");
 
             let parts: Vec<&str> = source.split(delimiter).collect();
@@ -220,26 +243,35 @@ pub fn execute_var_system(
 
         "base64_encode" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             variables.set(name, Value::String(format!("[base64: {}]", source)));
         }
 
         "url_encode" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
-            let encoded: String = source.chars().map(|c| {
-                if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
-                    c.to_string()
-                } else {
-                    format!("%{:02X}", c as u8)
-                }
-            }).collect();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
+            let encoded: String = source
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+                        c.to_string()
+                    } else {
+                        format!("%{:02X}", c as u8)
+                    }
+                })
+                .collect();
             variables.set(name, Value::String(encoded));
         }
 
         "url_decode" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let source = get_resolved("source").map(|v| v.as_string()).unwrap_or_default();
+            let source = get_resolved("source")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             let mut decoded = String::new();
             let mut chars = source.chars();
             while let Some(c) = chars.next() {
@@ -273,10 +305,16 @@ pub fn execute_var_system(
             variables.set(name, Value::Int(value));
         }
 
-        "get_layer_info" | "get_sound_info" | "get_backlog_size"
-        | "get_backlog_tags" | "get_message_layer_width"
-        | "get_message_layer_height" | "get_message_layer_line_width"
-        | "get_message_tags" | "get_font" | "get_exe_parameter" => {
+        "get_layer_info"
+        | "get_sound_info"
+        | "get_backlog_size"
+        | "get_backlog_tags"
+        | "get_message_layer_width"
+        | "get_message_layer_height"
+        | "get_message_layer_line_width"
+        | "get_message_tags"
+        | "get_font"
+        | "get_exe_parameter" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             // get_layer_info 需要设置子字段（left/top/width/height），
             // 否则 Lua 端 e:var("t.ly.width") 会读到 nil。
@@ -298,8 +336,11 @@ pub fn execute_var_system(
             }
         }
 
-        "file_crc" | "file_update_time" | "hmac_sha1_base64"
-        | "convert_encoding" | "character_reference_to_utf8"
+        "file_crc"
+        | "file_update_time"
+        | "hmac_sha1_base64"
+        | "convert_encoding"
+        | "character_reference_to_utf8"
         | "implode" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             variables.set(name, Value::String(String::new()));
@@ -316,7 +357,8 @@ fn delete_variable_tree(variables: &mut VariableStore, name: &str) {
     variables.remove(name);
 
     let prefix = format!("{}.", name);
-    let to_remove: Vec<String> = variables.iter_local()
+    let to_remove: Vec<String> = variables
+        .iter_local()
         .chain(variables.iter_global())
         .chain(variables.iter_temp())
         .chain(variables.iter_system())
@@ -406,7 +448,10 @@ mod tests {
             m
         };
         let mut resolved = HashMap::new();
-        resolved.insert("source".to_string(), Value::String("hello world".to_string()));
+        resolved.insert(
+            "source".to_string(),
+            Value::String("hello world".to_string()),
+        );
         resolved.insert("string".to_string(), Value::String("world".to_string()));
 
         execute_var_system("find", &params, &resolved, &mut vars).unwrap();
@@ -424,7 +469,10 @@ mod tests {
             m
         };
         let mut resolved = HashMap::new();
-        resolved.insert("source".to_string(), Value::String("hello world".to_string()));
+        resolved.insert(
+            "source".to_string(),
+            Value::String("hello world".to_string()),
+        );
         resolved.insert("position".to_string(), Value::Int(6));
         resolved.insert("length".to_string(), Value::Int(5));
 

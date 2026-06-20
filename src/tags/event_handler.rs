@@ -15,9 +15,12 @@ macro_rules! event_handler_struct {
             fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
                 let file = ctx.instruction.get("file").map(String::from);
                 let label = ctx.instruction.get("label").map(String::from);
-                let call = ctx.instruction.get("call")
+                let call = ctx
+                    .instruction
+                    .get("call")
                     .and_then(|v| v.parse::<i32>().ok())
-                    .unwrap_or(0) != 0;
+                    .unwrap_or(0)
+                    != 0;
                 let handler = ctx.instruction.get("handler").map(String::from);
 
                 // 已知字段以外的参数（key、adv、ui、btn 等）透传给宿主，

@@ -29,7 +29,10 @@ impl Instruction {
 
     /// 获取无键参数（第一个参数或 key 为 "0" 的参数）
     pub fn get_default(&self) -> Option<&str> {
-        self.params.get("0").or(self.params.values().next()).map(|s| s.as_str())
+        self.params
+            .get("0")
+            .or(self.params.values().next())
+            .map(|s| s.as_str())
     }
 
     /// 检查是否有某个参数
@@ -395,10 +398,7 @@ mod tests {
 
         let script = Script::parse("test", content).unwrap();
         assert_eq!(script.instructions[0].tag, "__text");
-        assert_eq!(
-            script.instructions[0].get("text"),
-            Some("这是剧情文本")
-        );
+        assert_eq!(script.instructions[0].get("text"), Some("这是剧情文本"));
     }
 
     #[test]

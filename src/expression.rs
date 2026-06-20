@@ -591,7 +591,9 @@ impl<'a> Parser<'a> {
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l + *r as f64)),
-            _ => Ok(Value::Int(left.as_int().unwrap_or(0) + right.as_int().unwrap_or(0))),
+            _ => Ok(Value::Int(
+                left.as_int().unwrap_or(0) + right.as_int().unwrap_or(0),
+            )),
         }
     }
 
@@ -602,7 +604,9 @@ impl<'a> Parser<'a> {
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 - r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l - *r as f64)),
-            _ => Ok(Value::Int(left.as_int().unwrap_or(0) - right.as_int().unwrap_or(0))),
+            _ => Ok(Value::Int(
+                left.as_int().unwrap_or(0) - right.as_int().unwrap_or(0),
+            )),
         }
     }
 
@@ -613,7 +617,9 @@ impl<'a> Parser<'a> {
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l * *r as f64)),
-            _ => Ok(Value::Int(left.as_int().unwrap_or(0) * right.as_int().unwrap_or(0))),
+            _ => Ok(Value::Int(
+                left.as_int().unwrap_or(0) * right.as_int().unwrap_or(0),
+            )),
         }
     }
 

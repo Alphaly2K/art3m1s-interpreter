@@ -283,10 +283,7 @@ mod tests {
 
         // 临时变量
         store.set("t.temp", Value::String("test".into()));
-        assert_eq!(
-            store.get("t.temp"),
-            Some(&Value::String("test".into()))
-        );
+        assert_eq!(store.get("t.temp"), Some(&Value::String("test".into())));
 
         // 清除临时变量
         store.clear_temp();

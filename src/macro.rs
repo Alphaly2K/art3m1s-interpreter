@@ -20,11 +20,7 @@ pub struct Macro {
 
 impl Macro {
     /// 从脚本中的标签块创建宏
-    pub fn from_script_block(
-        name: &str,
-        script: &Script,
-        start_line: usize,
-    ) -> Result<Self> {
+    pub fn from_script_block(name: &str, script: &Script, start_line: usize) -> Result<Self> {
         let mut instructions = Vec::new();
         let mut line = start_line; // 从标签定义行开始（但跳过标签本身）
 
@@ -136,11 +132,7 @@ impl MacroRegistry {
     }
 
     /// 展开宏调用
-    pub fn expand(
-        &self,
-        name: &str,
-        args: &HashMap<String, String>,
-    ) -> Result<Vec<Instruction>> {
+    pub fn expand(&self, name: &str, args: &HashMap<String, String>) -> Result<Vec<Instruction>> {
         let macro_def = self
             .get(name)
             .ok_or_else(|| Error::LabelNotFound(format!("宏未定义: {}", name)))?;
@@ -259,9 +251,6 @@ mod tests {
 
         let expanded = registry.expand("test_macro", &args).unwrap();
         assert_eq!(expanded.len(), 1);
-        assert_eq!(
-            expanded[0].get("data"),
-            Some("'Hello' + ' ' + 'World'")
-        );
+        assert_eq!(expanded[0].get("data"), Some("'Hello' + ' ' + 'World'"));
     }
 }

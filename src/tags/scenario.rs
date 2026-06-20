@@ -35,7 +35,9 @@ pub struct RpHandler;
 
 impl TagHandler for RpHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let backlog = ctx.instruction.get("backlog")
+        let backlog = ctx
+            .instruction
+            .get("backlog")
             .and_then(|v| v.parse::<i32>().ok());
         Ok(TagResult::Emit(Event::PageBreak { backlog }))
     }
@@ -113,7 +115,9 @@ impl TagHandler for LinkHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.instruction.get("file").map(String::from);
         let label = ctx.instruction.get("label").map(String::from);
-        let link_type = ctx.instruction.get("type")
+        let link_type = ctx
+            .instruction
+            .get("type")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0);
         let color = ctx.instruction.get("color").map(String::from);
@@ -172,7 +176,9 @@ pub struct ChgmsgHandler;
 impl TagHandler for ChgmsgHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.instruction.get("id").map(String::from);
-        let layered = ctx.instruction.get("layered")
+        let layered = ctx
+            .instruction
+            .get("layered")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::MessageLayerSwitch { id, layered }))
@@ -225,7 +231,9 @@ pub struct AutomodeHandler;
 
 impl TagHandler for AutomodeHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
         let layer = ctx.instruction.get("layer").map(String::from);
@@ -241,10 +249,14 @@ pub struct SkipHandler;
 
 impl TagHandler for SkipHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
-        let unread = ctx.instruction.get("unread")
+        let unread = ctx
+            .instruction
+            .get("unread")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::SkipConfig {
@@ -259,7 +271,9 @@ pub struct BacklogHandler;
 
 impl TagHandler for BacklogHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
         Ok(TagResult::Emit(Event::BacklogConfig { allow: allow != 0 }))
@@ -271,7 +285,9 @@ pub struct HideHandler;
 
 impl TagHandler for HideHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
         Ok(TagResult::Emit(Event::HideConfig { allow: allow != 0 }))
@@ -283,7 +299,9 @@ pub struct AlreadyreadHandler;
 
 impl TagHandler for AlreadyreadHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let mode = ctx.instruction.get("mode")
+        let mode = ctx
+            .instruction
+            .get("mode")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::AlreadyReadConfig { mode }))
@@ -295,10 +313,14 @@ pub struct WritebacklogHandler;
 
 impl TagHandler for WritebacklogHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let enable = ctx.instruction.get("enable")
+        let enable = ctx
+            .instruction
+            .get("enable")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
-        Ok(TagResult::Emit(Event::WriteBacklogConfig { enable: enable != 0 }))
+        Ok(TagResult::Emit(Event::WriteBacklogConfig {
+            enable: enable != 0,
+        }))
     }
 }
 

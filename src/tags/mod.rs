@@ -2,27 +2,27 @@
 //!
 //! 提供各种标签的执行逻辑。
 
-mod control;
-pub mod lua;
-mod ui;
-mod save;
 mod condition;
-pub mod var_handler;
+mod control;
+pub mod event_handler;
+mod layer;
+pub mod lua;
+mod save;
 mod scenario;
 mod sound;
 pub mod system;
-pub mod event_handler;
-mod layer;
+mod ui;
+pub mod var_handler;
 
-pub use lua::*;
-pub use ui::*;
-pub use save::*;
 pub use condition::*;
+pub use event_handler::*;
+pub use layer::*;
+pub use lua::*;
+pub use save::*;
 pub use scenario::*;
 pub use sound::*;
 pub use system::*;
-pub use event_handler::*;
-pub use layer::*;
+pub use ui::*;
 
 use crate::r#macro::MacroAddHandler;
 
@@ -109,7 +109,8 @@ impl<'a> ExecutionContext<'a> {
 
     /// 查找 else/elseif/endif 的位置（用于 if 条件为假时）
     pub fn find_else_elseif_or_endif(&self) -> Result<usize> {
-        let script = self.get_script(self.current_script)
+        let script = self
+            .get_script(self.current_script)
             .ok_or_else(|| crate::error::Error::ScriptNotFound(self.current_script.to_string()))?;
 
         let mut depth = 1;
@@ -148,7 +149,8 @@ impl<'a> ExecutionContext<'a> {
 
     /// 查找 endif 的位置（用于 else 执行后）
     pub fn find_endif(&self) -> Result<usize> {
-        let script = self.get_script(self.current_script)
+        let script = self
+            .get_script(self.current_script)
             .ok_or_else(|| crate::error::Error::ScriptNotFound(self.current_script.to_string()))?;
 
         let mut depth = 1;
@@ -178,7 +180,8 @@ impl<'a> ExecutionContext<'a> {
 
     /// 查找 /loop 的位置（用于 loop 条件为假时跳过循环体）
     pub fn find_endloop(&self) -> Result<usize> {
-        let script = self.get_script(self.current_script)
+        let script = self
+            .get_script(self.current_script)
             .ok_or_else(|| crate::error::Error::ScriptNotFound(self.current_script.to_string()))?;
 
         let mut depth = 1;
@@ -208,7 +211,8 @@ impl<'a> ExecutionContext<'a> {
 
     /// 查找对应 loop 的开始位置（用于 /loop 跳回循环开头）
     pub fn find_loop_start(&self) -> Result<usize> {
-        let script = self.get_script(self.current_script)
+        let script = self
+            .get_script(self.current_script)
             .ok_or_else(|| crate::error::Error::ScriptNotFound(self.current_script.to_string()))?;
 
         let mut depth = 1;
@@ -639,6 +643,7 @@ struct ExitHandler;
 
 impl TagHandler for ExitHandler {
     fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        println!("Exit called");
         Ok(TagResult::Emit(Event::Exit))
     }
 }
@@ -683,12 +688,13 @@ struct TagTagHandler;
 
 impl TagHandler for TagTagHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let data = ctx.instruction.get("data").ok_or_else(|| {
-            crate::error::Error::RuntimeError {
-                line: ctx.current_line,
-                message: "tag 标签缺少 data 参数".to_string(),
-            }
-        })?;
+        let data =
+            ctx.instruction
+                .get("data")
+                .ok_or_else(|| crate::error::Error::RuntimeError {
+                    line: ctx.current_line,
+                    message: "tag 标签缺少 data 参数".to_string(),
+                })?;
 
         // 解析逗号分隔的参数，支持反斜杠转义
         let parts = split_tag_data(data);

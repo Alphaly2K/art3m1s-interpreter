@@ -12,7 +12,9 @@ pub struct ExecHandler;
 impl TagHandler for ExecHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let command = ctx.instruction.get("command").unwrap_or("").to_string();
-        let mode = ctx.instruction.get("mode")
+        let mode = ctx
+            .instruction
+            .get("mode")
             .and_then(|v| v.parse::<i32>().ok());
         Ok(TagResult::Emit(Event::Exec { command, mode }))
     }
@@ -35,7 +37,9 @@ pub struct LoadHandler;
 impl TagHandler for LoadHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.resolve_param("file")?.as_string();
-        let trans_type = ctx.instruction.get("type")
+        let trans_type = ctx
+            .instruction
+            .get("type")
             .and_then(|v| v.parse::<i32>().ok());
         Ok(TagResult::Emit(Event::LoadGame { file, trans_type }))
     }
@@ -46,9 +50,13 @@ pub struct DebugHandler;
 
 impl TagHandler for DebugHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let mode = ctx.instruction.get("mode")
+        let mode = ctx
+            .instruction
+            .get("mode")
             .and_then(|v| v.parse::<i32>().ok());
-        let level = ctx.instruction.get("level")
+        let level = ctx
+            .instruction
+            .get("level")
             .and_then(|v| v.parse::<i32>().ok());
         Ok(TagResult::Emit(Event::DebugConfig { mode, level }))
     }
@@ -59,7 +67,9 @@ pub struct DebugprintHandler;
 
 impl TagHandler for DebugprintHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let level = ctx.instruction.get("level")
+        let level = ctx
+            .instruction
+            .get("level")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(0);
         let data = ctx.resolve_param("data")?.as_string();
@@ -91,15 +101,28 @@ pub struct MouseHandler;
 
 impl TagHandler for MouseHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let left = ctx.instruction.get("left")
+        let left = ctx
+            .instruction
+            .get("left")
             .and_then(|v| v.parse::<i32>().ok());
-        let top = ctx.instruction.get("top")
+        let top = ctx
+            .instruction
+            .get("top")
             .and_then(|v| v.parse::<i32>().ok());
-        let hide = ctx.instruction.get("hide")
+        let hide = ctx
+            .instruction
+            .get("hide")
             .and_then(|v| v.parse::<i32>().ok());
-        let autohide = ctx.instruction.get("autohide")
+        let autohide = ctx
+            .instruction
+            .get("autohide")
             .and_then(|v| v.parse::<u64>().ok());
-        Ok(TagResult::Emit(Event::MouseConfig { left, top, hide, autohide }))
+        Ok(TagResult::Emit(Event::MouseConfig {
+            left,
+            top,
+            hide,
+            autohide,
+        }))
     }
 }
 
@@ -125,7 +148,12 @@ impl TagHandler for FileHandler {
         let src = ctx.instruction.get("src").map(String::from);
         let dst = ctx.instruction.get("dst").map(String::from);
         let target = ctx.instruction.get("target").map(String::from);
-        Ok(TagResult::Emit(Event::FileOperation { command, src, dst, target }))
+        Ok(TagResult::Emit(Event::FileOperation {
+            command,
+            src,
+            dst,
+            target,
+        }))
     }
 }
 
@@ -170,9 +198,12 @@ pub struct AutosaveHandler;
 
 impl TagHandler for AutosaveHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
+            .unwrap_or(1)
+            != 0;
         Ok(TagResult::Emit(Event::AutoSaveConfig { allow }))
     }
 }
@@ -182,9 +213,12 @@ pub struct AvoidHandler;
 
 impl TagHandler for AvoidHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let allow = ctx.instruction.get("allow")
+        let allow = ctx
+            .instruction
+            .get("allow")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
+            .unwrap_or(1)
+            != 0;
         Ok(TagResult::Emit(Event::AvoidConfig { allow }))
     }
 }
@@ -194,7 +228,9 @@ pub struct VibrateHandler;
 
 impl TagHandler for VibrateHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let time = ctx.instruction.get("time")
+        let time = ctx
+            .instruction
+            .get("time")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         Ok(TagResult::Emit(Event::Vibrate { time }))
@@ -206,9 +242,12 @@ pub struct StatusbarHandler;
 
 impl TagHandler for StatusbarHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        let visible = ctx.instruction.get("visible")
+        let visible = ctx
+            .instruction
+            .get("visible")
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1) != 0;
+            .unwrap_or(1)
+            != 0;
         Ok(TagResult::Emit(Event::StatusBar { visible }))
     }
 }
