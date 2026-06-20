@@ -11,6 +11,7 @@ use crate::tags::{
 };
 use crate::variable::{Value, VariableStore};
 use mlua::Lua;
+use mlua::LuaSerdeExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -207,30 +208,44 @@ impl Interpreter {
     pub fn new(config: InterpreterConfig) -> Self {
         let lua = Lua::new();
 
-        // 注入 Pluto 序列化模块桩实现
-        // Artemis 引擎依赖 Pluto 库来序列化/反序列化 Lua 表，用于存档等功能
-        // 这里提供一个最小桩实现，使 boot 流程能继续
+        // 注入 Pluto 序列化——使用 serde_json 作为持久化后端。
+        // Artemis 脚本调用 pluto.persist(refs, tbl) / pluto.unpersist(refs, str)
+        // 来序列化 Lua 表。这里用 JSON 替代原版的 Pluto 二进制格式，功能等价。
         let pluto_code = r#"
             pluto = pluto or {}
-
             function pluto.persist(refs, tbl)
-                -- 桩实现：返回空字符串表示"无数据"
-                -- 真实实现应该序列化整个表
-                if type(tbl) == "table" then
-                    return ""  -- 空表或无法序列化的表
-                end
-                return tostring(tbl or "")
+                local ok, json = pcall(function() return __art3m1s_json_encode(tbl) end)
+                if ok then return json else return "" end
             end
-
             function pluto.unpersist(refs, str)
-                -- 桩实现：返回空表表示"无存档数据"
-                -- 真实实现应该从字符串反序列化表
-                return {}
+                if type(str) ~= "string" or str == "" then return {} end
+                local ok, tbl = pcall(function() return __art3m1s_json_decode(str) end)
+                if ok and type(tbl) == "table" then return tbl else return {} end
             end
         "#;
 
         if let Err(e) = lua.load(pluto_code).exec() {
             eprintln!("警告: 注入 Pluto 桩实现失败: {:?}", e);
+        }
+
+        // 注册 JSON 编解码函数
+        let encode = lua.create_function(|lua, value: mlua::Value| {
+            let json = serde_json::to_string(&value)
+                .map_err(|e| mlua::Error::external(format!("JSON encode: {e}")))?;
+            Ok(mlua::Value::String(lua.create_string(json)?))
+        });
+        let decode = lua.create_function(|lua, json_str: mlua::String| {
+            let s: String = json_str.to_string_lossy();
+            if s.is_empty() { return Ok(mlua::Value::Table(lua.create_table()?)); }
+            let value: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| mlua::Error::external(format!("JSON decode: {e}")))?;
+            lua.to_value(&value)
+        });
+        if let Err(e) = encode.and_then(|f| lua.globals().set("__art3m1s_json_encode", f)) {
+            eprintln!("警告: 注册 JSON encode 失败: {:?}", e);
+        }
+        if let Err(e) = decode.and_then(|f| lua.globals().set("__art3m1s_json_decode", f)) {
+            eprintln!("警告: 注册 JSON decode 失败: {:?}", e);
         }
 
         // 注入 Artemis 兼容的算术强制转换：字符串自动转数字，非数字字符串视为 0。
@@ -714,8 +729,11 @@ impl Interpreter {
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
                     self.current_line = line;
-                    // 停止 flush,让主循环从新位置开始执行
-                    return Ok(None);
+                    // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
+                    // 等函数调用仍有效（典型：fn.push 的 jump 和按钮点击 handler
+                    // 先后入队，jump 先于 handler 被抽到，若此时 return 则 handler
+                    // 被延迟到 jump 后的脚本上下文才执行，导致 dialog 返回值丢失）。
+                    continue;
                 }
                 TagResult::Call { file, label, return_line: _, return_script } => {
                     // 排队 call 与内联 call 的返回语义不同：
@@ -759,8 +777,8 @@ impl Interpreter {
                             .ok_or_else(|| Error::LabelNotFound(label.clone()))?;
                         self.current_line = line;
                     }
-                    // 停止 flush,让主循环执行被调用的脚本
-                    return Ok(None);
+                    // 继续抽干剩余标签——calllua 等函数调用在跨脚本跳转后仍然有效。
+                    continue;
                 }
                 TagResult::Return => {
                     if let Some(frame) = self.call_stack.pop() {
@@ -993,6 +1011,17 @@ impl Interpreter {
         *self.variables.lock().unwrap() = store;
     }
 
+    /// 加载存档后恢复解释器执行位置。
+    /// `jump_target` 为脚本内标签名（如 `"*title"`），解释器会从该标签继续执行。
+    pub fn restore_position(&mut self, script: &str, line: usize, stack: Vec<CallFrame>) -> Result<()> {
+        self.current_script = Some(script.to_string());
+        self.current_line = line;
+        self.call_stack = stack;
+        // 重新加载目标脚本并定位到当前行
+        self.load_external_script(script)?;
+        Ok(())
+    }
+
     /// 获取 Lua 上下文
     pub fn lua(&self) -> &Lua {
         &self.lua
@@ -1021,6 +1050,11 @@ impl Interpreter {
     /// 获取当前行号
     pub fn current_line(&self) -> usize {
         self.current_line
+    }
+
+    /// 获取调用栈快照（供存档序列化）
+    pub fn call_stack(&self) -> Vec<CallFrame> {
+        self.call_stack.clone()
     }
 
     /// 获取脚本

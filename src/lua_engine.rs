@@ -203,7 +203,7 @@ impl EngineApi {
 impl UserData for EngineApi {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // e:debug{level=0, data="foo", raw=false} 或 e:debug("foo")
-        methods.add_method_mut("debug", |_lua, this, args: mlua::MultiValue| {
+        methods.add_method("debug", |_lua, this, args: mlua::MultiValue| {
             let ctx = this.ctx.lock().unwrap();
             if args.is_empty() {
                 return Ok(());
@@ -226,7 +226,7 @@ impl UserData for EngineApi {
         });
 
         // e:tag{"lyc", id="0", file="bg"}
-        methods.add_method_mut("tag", |_lua, this, args: mlua::MultiValue| {
+        methods.add_method("tag", |_lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let tag_name: String = t.get(1).unwrap_or_default();
                 let mut params = HashMap::new();
@@ -276,7 +276,7 @@ impl UserData for EngineApi {
         });
 
         // e:enqueueTag{"tagname", param1="val1"}
-        methods.add_method_mut("enqueueTag", |lua, this, args: mlua::MultiValue| {
+        methods.add_method("enqueueTag", |lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let tag_name: String = t.get::<Value>(1).ok().and_then(|v| match v {
                     Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
@@ -353,7 +353,7 @@ impl UserData for EngineApi {
         });
 
         // e:setEventHandler{onEnterFrame="func", ...}
-        methods.add_method_mut("setEventHandler", |_lua, this, args: mlua::MultiValue| {
+        methods.add_method("setEventHandler", |_lua, this, args: mlua::MultiValue| {
             if let Some(Value::Table(t)) = args.into_iter().next() {
                 let mut handlers = HashMap::new();
                 for pair in t.pairs::<Value, Value>() {
