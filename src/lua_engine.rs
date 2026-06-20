@@ -102,6 +102,14 @@ pub trait EngineCallbacks: Send + Sync {
     }
 
     /// 执行外部 shell 命令（如打开 URL/文件）。
+
+    // ── Audio volume ──────────────────────────────────────────
+
+    fn set_master_volume(&self, _volume: f32) {}
+    fn set_bgm_volume(&self, _volume: f32) {}
+    fn set_se_volume(&self, _volume: f32) {}
+    fn set_voice_volume(&self, _volume: f32) {}
+
     fn call_shell_execute(&self, _file: &str, _params: HashMap<String, String>) {}
 
     /// 恢复字体缓存。
@@ -637,6 +645,41 @@ impl UserData for EngineApi {
         methods.add_method("setUseTouchHold", |_lua, this, enabled: bool| {
             let ctx = this.ctx.lock().unwrap();
             ctx.callbacks.set_use_touch_hold(enabled);
+            Ok(())
+        });
+
+        // e:setMasterVolume(volume)
+        methods.add_method("setMasterVolume", |_lua, this, volume: f32| {
+            let ctx = this.ctx.lock().unwrap();
+            ctx.callbacks.set_master_volume(volume);
+            Ok(())
+        });
+
+        // e:setBgmVolume(volume)
+        methods.add_method("setBgmVolume", |_lua, this, volume: f32| {
+            let ctx = this.ctx.lock().unwrap();
+            ctx.callbacks.set_bgm_volume(volume);
+            Ok(())
+        });
+
+        // e:setSeVolume(volume)
+        methods.add_method("setSeVolume", |_lua, this, volume: f32| {
+            let ctx = this.ctx.lock().unwrap();
+            ctx.callbacks.set_se_volume(volume);
+            Ok(())
+        });
+
+        // e:setVoiceVolume(volume)
+        methods.add_method("setVoiceVolume", |_lua, this, volume: f32| {
+            let ctx = this.ctx.lock().unwrap();
+            ctx.callbacks.set_voice_volume(volume);
+            Ok(())
+        });
+
+        // e:exit() — request game exit
+        methods.add_method("exit", |_lua, this, _: ()| {
+            let mut ctx = this.ctx.lock().unwrap();
+            ctx.tag_queue.push(("exit".to_string(), std::collections::HashMap::new()));
             Ok(())
         });
 
