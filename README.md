@@ -386,4 +386,8 @@ registry.load_from_script(&macro_script)?;
 
 ## 许可证
 
-MIT
+AGPLv3.0
+
+## 致谢
+
+[artemis-engine-port-tools](https://github.com/ATSPwang618/artemis-engine-port-tools)
