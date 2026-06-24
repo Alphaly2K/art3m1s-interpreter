@@ -412,7 +412,11 @@ pub enum Event {
     /// 截图 [takess]
     TakeScreenshot,
     /// 保存截图 [savess]
-    SaveScreenshot { file: String },
+    SaveScreenshot {
+        file: String,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
 
     // ── 脚本/宏 ──────────────────────────────────────
     /// 右键单击脚本 [rclick]

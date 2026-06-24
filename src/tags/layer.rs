@@ -384,7 +384,19 @@ pub struct SavessHandler;
 impl TagHandler for SavessHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.instruction.get("file").unwrap_or("").to_string();
-        Ok(TagResult::Emit(Event::SaveScreenshot { file }))
+        let width = ctx
+            .instruction
+            .get("width")
+            .and_then(|value| value.parse::<u32>().ok());
+        let height = ctx
+            .instruction
+            .get("height")
+            .and_then(|value| value.parse::<u32>().ok());
+        Ok(TagResult::Emit(Event::SaveScreenshot {
+            file,
+            width,
+            height,
+        }))
     }
 }
 
