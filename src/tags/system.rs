@@ -26,7 +26,6 @@ pub struct SaveHandler;
 impl TagHandler for SaveHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let file = ctx.resolve_param("file")?.as_string();
-        eprintln!("[TRACE] SaveHandler executed, file={file}");
         Ok(TagResult::Emit(Event::SaveGame { file }))
     }
 }

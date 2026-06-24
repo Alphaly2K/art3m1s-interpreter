@@ -9,7 +9,6 @@ use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
 use mlua::Lua;
-use mlua::LuaSerdeExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +56,13 @@ pub struct CallFrame {
     pub script: String,
     /// 返回行号
     pub return_line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueuedTagDrain {
+    pub wait: Option<Event>,
+    pub saw_return: bool,
+    pub changed_position: bool,
 }
 
 /// 解释器配置
@@ -199,6 +205,57 @@ pub struct Interpreter {
     /// 跳到相邻的 `*movie_play [stop]`，导致 brandlogo 卡死。故此处记录来源，
     /// 让 `advance_line()` 对排队来源的 Wait 退化为空操作。
     last_wait_from_queue: bool,
+    last_flush_saw_return: bool,
+    last_flush_changed_position: bool,
+}
+
+fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
+    match value {
+        serde_json::Value::Null => Ok(mlua::Value::Nil),
+        serde_json::Value::Bool(value) => Ok(mlua::Value::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(mlua::Value::Integer(value))
+            } else if let Some(value) = value.as_u64() {
+                if value <= i64::MAX as u64 {
+                    Ok(mlua::Value::Integer(value as i64))
+                } else {
+                    Ok(mlua::Value::Number(value as f64))
+                }
+            } else {
+                Ok(mlua::Value::Number(value.as_f64().unwrap_or(0.0)))
+            }
+        }
+        serde_json::Value::String(value) => Ok(mlua::Value::String(lua.create_string(&value)?)),
+        serde_json::Value::Array(values) => {
+            let table = lua.create_table()?;
+            for (index, value) in values.into_iter().enumerate() {
+                table.set((index + 1) as i64, json_to_lua_value(lua, value)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+        serde_json::Value::Object(values) => {
+            let table = lua.create_table()?;
+            for (key, value) in values {
+                let value = json_to_lua_value(lua, value)?;
+                if let Some(key) = parse_canonical_integer_key(&key) {
+                    table.set(key, value)?;
+                } else {
+                    table.set(key, value)?;
+                }
+            }
+            Ok(mlua::Value::Table(table))
+        }
+    }
+}
+
+fn parse_canonical_integer_key(key: &str) -> Option<i64> {
+    let value = key.parse::<i64>().ok()?;
+    if value.to_string() == key {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 impl Interpreter {
@@ -239,7 +296,7 @@ impl Interpreter {
             }
             let value: serde_json::Value = serde_json::from_str(&s)
                 .map_err(|e| mlua::Error::external(format!("JSON decode: {e}")))?;
-            lua.to_value(&value)
+            json_to_lua_value(lua, value)
         });
         if let Err(e) = encode.and_then(|f| lua.globals().set("__art3m1s_json_encode", f)) {
             eprintln!("警告: 注册 JSON encode 失败: {:?}", e);
@@ -327,6 +384,8 @@ impl Interpreter {
             callback: Box::new(default_callback),
             engine_ctx,
             last_wait_from_queue: false,
+            last_flush_saw_return: false,
+            last_flush_changed_position: false,
         }
     }
 
@@ -773,6 +832,7 @@ impl Interpreter {
                 // 改动 current_script/current_line 后继续抽干队列；flush 返回后
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
+                    self.last_flush_changed_position = true;
                     self.current_line = line;
                     // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
                     // 等函数调用仍有效（典型：fn.push 的 jump 和按钮点击 handler
@@ -786,6 +846,7 @@ impl Interpreter {
                     return_line: _,
                     return_script,
                 } => {
+                    self.last_flush_changed_position = true;
                     // 排队 call 与内联 call 的返回语义不同：
                     // 内联 call 时 `self.current_line` 指向 call 指令本身，handler
                     // 用 `current_line + 1` 让 return 落到下一条指令是对的。
@@ -831,6 +892,8 @@ impl Interpreter {
                     continue;
                 }
                 TagResult::Return => {
+                    self.last_flush_saw_return = true;
+                    self.last_flush_changed_position = true;
                     if let Some(frame) = self.call_stack.pop() {
                         self.current_script = Some(frame.script);
                         self.current_line = frame.return_line;
@@ -994,6 +1057,69 @@ impl Interpreter {
             crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
         }
         Ok(())
+    }
+
+    /// 触发存档前的 `onSave` 处理器（脚本中通过 `e:setEventHandler{onSave=...}` 注册）。
+    ///
+    /// 该回调（如 `store`）负责把 `sys`/`gscr`/`conf` 等 Lua 表经 pluto 序列化进
+    /// Artemis 变量（`fsave_pluto` → `e:tag{"var",...}`），从而让存档界面所需的
+    /// `sys.saveslot` 元数据随变量一同落盘。**必须在快照变量之前调用**，且调用后
+    /// 还需抽干标签队列（`[var]` 标签是排队执行的），快照才能包含这些变量。
+    ///
+    /// 与 [`Self::fire_enter_frame`] 同样的约束：先取出 handler 名释放锁再调用 Lua。
+    pub fn fire_save_handler(&mut self) -> Result<()> {
+        let handler = {
+            let ctx = self.engine_ctx.lock().unwrap();
+            ctx.event_handlers.get("onSave").cloned()
+        };
+        if let Some(func) = handler {
+            crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
+        }
+        Ok(())
+    }
+
+    /// 触发读档后的 `onLoad` 处理器（脚本中通过 `e:setEventHandler{onLoad=...}` 注册）。
+    ///
+    /// 该回调（如 `restore`）负责把读档恢复的 Artemis 变量经 pluto 反序列化回
+    /// `sys`/`gscr`/`conf`/`scr`/`log` 等 Lua 表（`loadconv` → `fload_pluto`），
+    /// 否则即便变量已恢复，承载游戏态与存档槽位的 Lua 表仍是旧的。
+    /// **必须在 [`Self::restore_variables`] 之后调用**。
+    pub fn fire_load_handler(&mut self) -> Result<()> {
+        let handler = {
+            let ctx = self.engine_ctx.lock().unwrap();
+            ctx.event_handlers.get("onLoad").cloned()
+        };
+        if let Some(func) = handler {
+            crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
+        }
+        Ok(())
+    }
+
+    /// 抽干当前排队的标签（公开包装 [`Self::flush_tag_queue`]）。
+    ///
+    /// 供宿主在触发 `onSave`/`onLoad` 处理器后调用：`store`/`restore` 通过
+    /// `e:tag{"var",...}` 把序列化结果排入标签队列，这些 `[var]` 标签返回
+    /// `Continue`，一次抽干即可将变量真正写入 `VariableStore`，使随后的存档快照
+    /// 或读档恢复看到完整变量。
+    pub fn flush_pending_tags(&mut self) -> Result<()> {
+        self.flush_tag_queue()?;
+        Ok(())
+    }
+
+    /// 只抽干 Lua/事件排入的标签队列，不在队列清空后继续执行主脚本。
+    pub fn drain_queued_tags_only(&mut self) -> Result<QueuedTagDrain> {
+        self.last_flush_saw_return = false;
+        self.last_flush_changed_position = false;
+        let wait = match self.flush_tag_queue()? {
+            Some(ExecutionResult::Wait(event)) => Some(event),
+            Some(ExecutionResult::Completed) | None => None,
+            Some(_) => None,
+        };
+        Ok(QueuedTagDrain {
+            wait,
+            saw_return: self.last_flush_saw_return,
+            changed_position: self.last_flush_changed_position,
+        })
     }
 
     /// 当前行号加一。
