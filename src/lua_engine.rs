@@ -120,6 +120,9 @@ pub trait EngineCallbacks: Send + Sync {
         None
     }
 
+    /// 同步绑定 surface（阻塞直到加载完成）。
+    fn bind_surface(&self, _key: &str) {}
+
     /// 异步绑定（预加载）surface。
     fn bind_surface_async(&self, _key: &str) {}
 
@@ -766,6 +769,14 @@ impl UserData for EngineApi {
                 }
                 None => Ok(mlua::Value::Nil),
             }
+        });
+
+        // e:bindSurface(key)
+        methods.add_method("bindSurface", |_lua, this, key: mlua::Value| {
+            let key = lua_value_to_key(&key);
+            let ctx = this.ctx.lock().unwrap();
+            ctx.callbacks.bind_surface(&key);
+            Ok(())
         });
 
         // e:bindSurfaceAsync(key)
