@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-asb-decrypt = { path = "../asb-decrypt" }
+asb-decrypt = { git = "https://github.com/Alphaly2K/asb-decrypt" }
 mlua = { version = "0.10", features = ["lua51", "send", "serialize", "vendored"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
