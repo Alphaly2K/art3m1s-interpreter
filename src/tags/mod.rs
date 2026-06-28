@@ -58,6 +58,8 @@ pub enum TagResult {
     Wait(Event),
     /// 发出事件
     Emit(Event),
+    /// 发出多个事件
+    EmitMany(Vec<Event>),
     /// 动态执行另一条指令（用于 tag 标签）
     Dynamic(Instruction),
 }

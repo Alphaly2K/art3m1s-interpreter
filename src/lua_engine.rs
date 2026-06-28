@@ -194,9 +194,12 @@ pub struct EngineContext {
     pub tag_queue: Vec<(String, HashMap<String, String>)>,
     /// 待设置的事件处理器
     pub event_handlers: HashMap<String, String>,
+    /// 事件过滤器函数（由 e:setEventFilter 设置）
+    /// 当输入事件发生时，引擎调用此过滤器，脚本决定如何处理
+    pub event_filter: Option<mlua::RegistryKey>,
     /// 项目文件读取器，供 `e:include` 读取 Lua/数据文件。
     ///
-    /// `e:include(path)` 的语义是“读取文件并在当前 Lua VM 中执行”，因此 include
+    /// `e:include(path)` 的语义是”读取文件并在当前 Lua VM 中执行”，因此 include
     /// 必须能读到项目文件。回调拿不到 Lua VM，故这里直接持有读取器，由 `e:include`
     /// 闭包用 mlua 传入的 `lua` 句柄重入执行。宿主通过
     /// [`Interpreter::set_file_loader`](crate::Interpreter::set_file_loader) 注入。
@@ -218,6 +221,7 @@ impl EngineContext {
             callbacks,
             tag_queue: Vec::new(),
             event_handlers: HashMap::new(),
+            event_filter: None,
             file_reader: None,
             variables: None,
         }
@@ -232,6 +236,53 @@ pub struct EngineApi {
 impl EngineApi {
     pub fn new(ctx: Arc<Mutex<EngineContext>>) -> Self {
         Self { ctx }
+    }
+
+    /// 分发事件通过事件过滤器。
+    /// 返回 Some(0/1/2) 表示过滤器已处理，None 表示没有过滤器或过滤器返回 0（引擎处理）。
+    /// - 0: 引擎正常处理
+    /// - 1: 脚本已处理，引擎什么都不做
+    /// - 2: 分发失败，引擎执行默认行为
+    pub fn dispatch_event(
+        &self,
+        lua: &mlua::Lua,
+        event_name: &str,
+        params: &HashMap<String, String>,
+    ) -> Option<i32> {
+        let ctx = self.ctx.lock().unwrap();
+        let filter_key = ctx.event_filter.as_ref()?;
+
+        // 从 registry 获取过滤器函数
+        let filter: mlua::Function = match lua.registry_value(filter_key) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+
+        // 构造参数表
+        let params_table = match lua.create_table() {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        for (k, v) in params {
+            let _ = params_table.set(k.as_str(), v.as_str());
+        }
+
+        // 调用过滤器: eventFilter(e, nm, p)
+        // e 是 EngineApi 自身（self），但这里我们不能直接传递 self
+        // 所以传递一个简化的事件对象
+        let event_obj = match lua.create_table() {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+
+        match filter.call::<i32>((event_obj, event_name, params_table)) {
+            Ok(result) => Some(result),
+            Err(e) => {
+                ctx.callbacks
+                    .debug(0, &format!("eventFilter error: {}", e), false);
+                None
+            }
+        }
     }
 }
 
@@ -651,8 +702,25 @@ impl UserData for EngineApi {
         });
 
         // e:setEventFilter(filter)
-        methods.add_method("setEventFilter", |_lua, this, _filter: mlua::Value| {
-            let ctx = this.ctx.lock().unwrap();
+        methods.add_method("setEventFilter", |lua, this, filter: mlua::Value| {
+            let mut ctx = this.ctx.lock().unwrap();
+            // 将过滤器函数存入 registry，以便后续调用
+            match filter {
+                mlua::Value::Function(f) => {
+                    ctx.event_filter = Some(lua.create_registry_value(f)?);
+                }
+                mlua::Value::Nil => {
+                    // 传入 nil 表示清除过滤器
+                    if let Some(key) = ctx.event_filter.take() {
+                        let _ = lua.remove_registry_value(key);
+                    }
+                }
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "setEventFilter expects a function or nil".to_string(),
+                    ));
+                }
+            }
             ctx.callbacks.set_event_filter();
             Ok(())
         });

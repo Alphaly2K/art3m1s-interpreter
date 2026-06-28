@@ -662,6 +662,22 @@ impl Interpreter {
                         }
                     }
                 }
+                TagResult::EmitMany(events) => {
+                    for event in events {
+                        let result = (self.callback)(event.clone());
+                        match result {
+                            CallbackResult::Continue => {}
+                            CallbackResult::Pause => {
+                                return Ok(ExecutionResult::Wait(event));
+                            }
+                            CallbackResult::Abort => {
+                                return Err(Error::Aborted);
+                            }
+                        }
+                    }
+                    self.current_line += 1;
+                    continue;
+                }
                 TagResult::Dynamic(inner_instruction) => {
                     // 动态执行另一条指令（用于 tag 标签）
                     let inner_result = self.execute_tag(&inner_instruction)?;
@@ -704,6 +720,22 @@ impl Interpreter {
                                     return Err(Error::Aborted);
                                 }
                             }
+                        }
+                        TagResult::EmitMany(events) => {
+                            for event in events {
+                                let result = (self.callback)(event.clone());
+                                match result {
+                                    CallbackResult::Continue => {}
+                                    CallbackResult::Pause => {
+                                        return Ok(ExecutionResult::Wait(event));
+                                    }
+                                    CallbackResult::Abort => {
+                                        return Err(Error::Aborted);
+                                    }
+                                }
+                            }
+                            self.current_line += 1;
+                            continue;
                         }
                         TagResult::Dynamic(_) => {
                             // 不支持嵌套动态标签
@@ -825,6 +857,19 @@ impl Interpreter {
                         }
                         CallbackResult::Abort => return Err(Error::Aborted),
                     }
+                }
+                TagResult::EmitMany(events) => {
+                    for event in events {
+                        match (self.callback)(event.clone()) {
+                            CallbackResult::Continue => {}
+                            CallbackResult::Pause => {
+                                self.last_wait_from_queue = true;
+                                return Ok(Some(ExecutionResult::Wait(event)));
+                            }
+                            CallbackResult::Abort => return Err(Error::Aborted),
+                        }
+                    }
+                    continue;
                 }
                 // Lua 也会通过 eqtag/enqueueTag 排入控制流标签，最典型的是
                 // `eqtag{"jump", file=..., label="game_start"}`（跨脚本跳转返回

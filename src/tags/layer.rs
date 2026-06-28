@@ -125,6 +125,20 @@ impl TagHandler for LyeventHandler {
             .unwrap_or(0)
             != 0;
 
+        // Artemis 简写语法支持：
+        // lyevent{ id=... click="func" } 等价于注册 click 的 calllua function=func。
+        // HENPRI 等脚本还使用 over/out，分别对应 rollover/rollout。
+        let event_type_shorthands = [
+            ("click", "click"),
+            ("rollover", "rollover"),
+            ("rollout", "rollout"),
+            ("over", "rollover"),
+            ("out", "rollout"),
+            ("drag", "drag"),
+            ("dragin", "dragin"),
+            ("dragout", "dragout"),
+        ];
+
         // 把已知字段以外的参数收集为 extra_params（function、name、key、se 等）。
         // 这些会在事件触发时由宿主原样塞进 handler 标签（如 calllua）的参数表，
         // 引擎不解释其语义。
@@ -137,25 +151,71 @@ impl TagHandler for LyeventHandler {
             "call",
             "handler",
             "penetration",
+            "click",
+            "rollover",
+            "rollout",
+            "over",
+            "out",
+            "drag",
+            "dragin",
+            "dragout",
         ];
-        let mut extra_params = std::collections::HashMap::new();
+        let mut base_extra_params = std::collections::HashMap::new();
         for (k, v) in ctx.instruction.params.iter() {
             if !known.contains(&k.as_str()) {
-                extra_params.insert(k.clone(), v.clone());
+                base_extra_params.insert(k.clone(), v.clone());
             }
         }
 
-        Ok(TagResult::Emit(Event::LayerEventHandler {
-            id,
-            event_type,
-            mode,
-            file,
-            label,
-            call,
-            handler,
-            penetration,
-            extra_params,
-        }))
+        let mut registrations: Vec<(
+            String,
+            Option<String>,
+            std::collections::HashMap<String, String>,
+        )> = Vec::new();
+
+        for &(param_name, mapped_event) in &event_type_shorthands {
+            if let Some(func) = ctx.instruction.get(param_name) {
+                let mut params = base_extra_params.clone();
+                params
+                    .entry("function".to_string())
+                    .or_insert_with(|| func.to_string());
+                params
+                    .entry("label".to_string())
+                    .or_insert_with(|| func.to_string());
+                registrations.push((
+                    mapped_event.to_string(),
+                    handler.clone().or_else(|| Some("calllua".to_string())),
+                    params,
+                ));
+            }
+        }
+
+        if registrations.is_empty() {
+            registrations.push((event_type.clone(), handler.clone(), base_extra_params));
+        }
+
+        let events: Vec<Event> = registrations
+            .into_iter()
+            .map(
+                |(event_type, handler, extra_params)| Event::LayerEventHandler {
+                    id: id.clone(),
+                    event_type,
+                    mode: mode.clone(),
+                    file: file.clone(),
+                    label: label.clone(),
+                    call,
+                    handler,
+                    penetration,
+                    extra_params,
+                },
+            )
+            .collect();
+
+        if events.len() == 1 {
+            Ok(TagResult::Emit(events.into_iter().next().unwrap()))
+        } else {
+            Ok(TagResult::EmitMany(events))
+        }
     }
 }
 
@@ -206,6 +266,69 @@ impl TagHandler for LydragHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.instruction.get("id").unwrap_or("").to_string();
         Ok(TagResult::Emit(Event::LayerDrag { id }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::script::Instruction;
+    use crate::tags::ExecutionContext;
+    use crate::variable::VariableStore;
+
+    #[test]
+    fn lyevent_over_out_registers_rollover_rollout_calllua() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "lyevent".into(),
+            params: HashMap::from([
+                ("id".into(), "dock".into()),
+                ("over".into(), "mwarea_over".into()),
+                ("out".into(), "mwarea_out".into()),
+            ]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+
+        let TagResult::EmitMany(events) = LyeventHandler.execute(&mut ctx).unwrap() else {
+            panic!("over/out should produce two layer event registrations");
+        };
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::LayerEventHandler {
+                id,
+                event_type,
+                handler: Some(handler),
+                extra_params,
+                ..
+            } if id == "dock"
+                && event_type == "rollover"
+                && handler == "calllua"
+                && extra_params.get("function").map(String::as_str) == Some("mwarea_over")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::LayerEventHandler {
+                id,
+                event_type,
+                handler: Some(handler),
+                extra_params,
+                ..
+            } if id == "dock"
+                && event_type == "rollout"
+                && handler == "calllua"
+                && extra_params.get("function").map(String::as_str) == Some("mwarea_out")
+        )));
     }
 }
 

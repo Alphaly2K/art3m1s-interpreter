@@ -26,7 +26,9 @@ pub fn apply_var_tag(
         let mut resolved: HashMap<String, Value> = HashMap::new();
         {
             let evaluator = ExpressionEvaluator::new(variables);
-            for key in &["source", "string", "min", "max", "position", "length", "file", "target"] {
+            for key in &[
+                "source", "string", "min", "max", "position", "length", "file", "target",
+            ] {
                 if let Some(val) = params.get(*key) {
                     resolved.insert(key.to_string(), evaluator.resolve_param(val)?);
                 }
@@ -236,7 +238,9 @@ pub fn execute_var_system(
 
         "file_exist" | "file_exists" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let file = get_resolved("file").map(|v| v.as_string()).unwrap_or_default();
+            let file = get_resolved("file")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             // .exe 文件直接假装存在（引擎不会真正读取 exe，只是游戏的启动检查）
             let exists = if file.to_ascii_lowercase().ends_with(".exe") {
                 true
@@ -343,7 +347,9 @@ pub fn execute_var_system(
 
         "file_crc" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            let file = get_resolved("file").map(|v| v.as_string()).unwrap_or_default();
+            let file = get_resolved("file")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
             // .exe 文件直接返回"期望 CRC"（从同名变量读取，去掉 .check 后缀）
             // 例如：name="t.crc.exe.check" → 查找 "t.crc.exe" 的值
             if file.to_ascii_lowercase().ends_with(".exe") {
