@@ -70,6 +70,11 @@ pub trait EngineCallbacks: Send + Sync {
     /// 获取脚本等待原因
     fn get_script_wait_reason(&self) -> u8;
 
+    // 查询图层信息，供 `var system="get_layer_info"` 这类同步查询使用。
+    fn get_layer_info(&self, _id: &str) -> Option<HashMap<String, String>> {
+        None
+    }
+
     // ----------------------------------------------------------------
     // 以下为 boot 流程所需、暂以默认实现（no-op / 合理默认值）提供的回调。
     // 接入真实渲染/资源后端时，宿主可覆盖这些方法。
@@ -299,7 +304,29 @@ impl UserData for EngineApi {
                 if tag_name == "var" {
                     if let Some(vars) = &ctx.variables {
                         let mut store = vars.lock().unwrap();
-                        if let Err(e) = crate::tags::var_handler::apply_var_tag(&params, &mut store)
+                        let handled =
+                            if params.get("system").map(String::as_str) == Some("get_layer_info") {
+                                let name = params.get("name").map(String::as_str).unwrap_or("");
+                                let id = params.get("id").map(String::as_str).unwrap_or("");
+                                if let Some(info) = ctx.callbacks.get_layer_info(id) {
+                                    for (key, value) in info {
+                                        let value = value
+                                            .parse::<f64>()
+                                            .map(crate::variable::Value::Float)
+                                            .unwrap_or(crate::variable::Value::String(value));
+                                        store.set(&format!("{name}.{key}"), value);
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                        if !handled
+                            && let Err(e) =
+                                crate::tags::var_handler::apply_var_tag(&params, &mut store)
                         {
                             return Err(mlua::Error::external(format!("var 标签执行失败: {e}")));
                         }
