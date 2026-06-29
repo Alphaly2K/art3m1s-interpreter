@@ -215,10 +215,10 @@ fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::
         serde_json::Value::Bool(value) => Ok(mlua::Value::Boolean(value)),
         serde_json::Value::Number(value) => {
             if let Some(value) = value.as_i64() {
-                Ok(mlua::Value::Integer(value))
+                Ok(lua_integer_value(value))
             } else if let Some(value) = value.as_u64() {
                 if value <= i64::MAX as u64 {
-                    Ok(mlua::Value::Integer(value as i64))
+                    Ok(lua_integer_value(value as i64))
                 } else {
                     Ok(mlua::Value::Number(value as f64))
                 }
@@ -246,6 +246,21 @@ fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::
             }
             Ok(mlua::Value::Table(table))
         }
+    }
+}
+
+fn lua_integer_value(value: i64) -> mlua::Value {
+    #[cfg(feature = "backend-luau")]
+    {
+        if let Ok(value) = mlua::Integer::try_from(value) {
+            mlua::Value::Integer(value)
+        } else {
+            mlua::Value::Number(value as f64)
+        }
+    }
+    #[cfg(not(feature = "backend-luau"))]
+    {
+        mlua::Value::Integer(value as mlua::Integer)
     }
 }
 
@@ -409,6 +424,10 @@ impl Interpreter {
         // 共享同一份变量存储给 engine 上下文，使 e:var 能读到解释器写入的变量。
         engine_ctx_inner.variables = Some(Arc::clone(&variables));
         let engine_ctx = Arc::new(Mutex::new(engine_ctx_inner));
+        #[cfg(feature = "backend-luau")]
+        if let Err(e) = crate::luau_polyfill::install(&lua, Arc::clone(&engine_ctx)) {
+            eprintln!("警告: 注入 Luau 兼容层失败: {:?}", e);
+        }
         let _ = crate::lua_engine::init_lua_engine_api(&lua, Arc::clone(&engine_ctx));
 
         Self {
@@ -1350,6 +1369,12 @@ impl Default for Interpreter {
 mod tests {
     use super::Interpreter;
     use crate::InterpreterConfig;
+    #[cfg(feature = "backend-luau")]
+    use crate::lua_engine::EngineCallbacks;
+    #[cfg(feature = "backend-luau")]
+    use std::collections::HashMap;
+    #[cfg(feature = "backend-luau")]
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn pluto_preserves_mixed_numeric_and_string_table_keys() {
@@ -1384,5 +1409,165 @@ mod tests {
         assert_eq!(restored.get::<i64>("count").unwrap(), 4);
         assert!(check.get::<bool>("save0001").unwrap());
         assert!(check.get::<bool>("save0004").unwrap());
+    }
+
+    #[test]
+    fn artemis_string_arithmetic_coercion_is_installed() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let value: i64 = interpreter
+            .lua()
+            .load(
+                r#"
+                return ("100" + 20)
+                    + ("off" * 5)
+                    + (5 * "off")
+                    + ("20" - 5)
+                    + (100 / "4")
+                    + ("x" % 3)
+                    + (-"8")
+                    + ("2" ^ "3")
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(value, 160);
+    }
+
+    #[cfg(feature = "backend-luau")]
+    #[test]
+    fn luau_polyfills_cover_maxn_os_and_host_file_write() {
+        let writes = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_engine_callbacks(Box::new(TestCallbacks {
+            writes: Arc::clone(&writes),
+        }));
+
+        interpreter
+            .lua()
+            .load(
+                r#"
+                assert(table.maxn({[2] = true, [4] = true, name = "x"}) == 4)
+                assert(os.date("!%Y-%m-%d %H:%M:%S", 0) == "1970-01-01 00:00:00")
+                assert(os.execute("anything") == -1)
+                assert(os.getenv("HOME") == nil)
+                assert(math.mod(7, 4) == 3)
+                assert(table.getn({1, 2, 3}) == 3)
+
+                local f = assert(io.open("save/test.bin", "wb"))
+                assert(f:write("A", 12))
+                assert(f:close())
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(
+            writes.as_slice(),
+            [("save/test.bin".to_string(), b"A12".to_vec())]
+        );
+    }
+
+    #[cfg(feature = "backend-luau")]
+    #[test]
+    fn luau_string_gfind_supports_artemis_split_helper() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        let parts: mlua::Table = interpreter
+            .lua()
+            .load(
+                r##"
+                function split(str, delim)
+                    if not str then
+                        return {}
+                    elseif not str:find(delim) then
+                        return { str }
+                    end
+
+                    local result = {}
+                    local pat = "(.-)" .. delim .. "()"
+                    local lastPos
+                    for part, pos in string.gfind(str, pat) do
+                        table.insert(result, part)
+                        lastPos = pos
+                    end
+                    table.insert(result, string.sub(str, lastPos))
+                    return result
+                end
+
+                return split("s.sp==0", "#")
+                "##,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(parts.get::<String>(1).unwrap(), "s.sp==0");
+
+        let parts: mlua::Table = interpreter
+            .lua()
+            .load(r#"return split("alpha,beta,gamma", ",")"#)
+            .eval()
+            .unwrap();
+        assert_eq!(parts.get::<String>(1).unwrap(), "alpha");
+        assert_eq!(parts.get::<String>(2).unwrap(), "beta");
+        assert_eq!(parts.get::<String>(3).unwrap(), "gamma");
+    }
+
+    #[cfg(feature = "backend-luau")]
+    struct TestCallbacks {
+        writes: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    }
+
+    #[cfg(feature = "backend-luau")]
+    impl EngineCallbacks for TestCallbacks {
+        fn debug(&self, _level: i32, _data: &str, _raw: bool) {}
+        fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
+        fn set_event_handler(&self, _handlers: HashMap<String, String>) {}
+        fn get_script_status(&self) -> u8 {
+            0
+        }
+        fn is_key_down(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_key_down_edge(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_key_up_edge(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_decide(&self) -> bool {
+            false
+        }
+        fn get_mouse_point(&self) -> (i32, i32) {
+            (0, 0)
+        }
+        fn get_touch_count(&self) -> u32 {
+            0
+        }
+        fn get_touch_point(&self, _index: u32) -> (i32, i32) {
+            (0, 0)
+        }
+        fn is_file_exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn file_write(&self, path: &str, data: &[u8]) -> crate::Result<()> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((path.to_string(), data.to_vec()));
+            Ok(())
+        }
+        fn file_operation(&self, _command: &str, _params: HashMap<String, String>) {}
+        fn include(&self, _path: &str) {}
+        fn override_key(&self, _from: u32, _to: u32) {}
+        fn set_flick_sensitivity(&self, _sensitivity: f64) {}
+        fn get_script_block(&self) -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+            Vec::new()
+        }
+        fn get_script_wait_reason(&self) -> u8 {
+            0
+        }
     }
 }

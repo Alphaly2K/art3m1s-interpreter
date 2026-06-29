@@ -49,6 +49,13 @@ pub trait EngineCallbacks: Send + Sync {
     /// 检查文件是否存在
     fn is_file_exists(&self, path: &str) -> bool;
 
+    /// 写文件。Luau 后端的 `io.open(path, "wb")` polyfill 使用该回调落盘。
+    fn file_write(&self, _path: &str, _data: &[u8]) -> crate::Result<()> {
+        Err(crate::Error::IoError(std::io::Error::other(
+            "file_write callback not implemented",
+        )))
+    }
+
     /// 文件操作
     fn file_operation(&self, command: &str, params: HashMap<String, String>);
 
@@ -565,7 +572,7 @@ impl UserData for EngineApi {
             };
             let store = vars.lock().unwrap();
             match store.get(&name) {
-                Some(V::Int(n)) => Ok(mlua::Value::Integer(*n)),
+                Some(V::Int(n)) => Ok(lua_integer_value(*n)),
                 Some(V::Float(f)) => Ok(mlua::Value::Number(*f)),
                 // Artemis 变量系统没有独立布尔类型：比较/逻辑表达式（如 `$0==0`）
                 // 的结果在脚本里一律当整数 1/0 用，game 侧普遍写成
@@ -921,6 +928,21 @@ fn lua_value_to_key(v: &mlua::Value) -> String {
         mlua::Value::Integer(n) => n.to_string(),
         mlua::Value::Number(n) => n.to_string(),
         _ => String::new(),
+    }
+}
+
+fn lua_integer_value(value: i64) -> mlua::Value {
+    #[cfg(feature = "backend-luau")]
+    {
+        if let Ok(value) = mlua::Integer::try_from(value) {
+            mlua::Value::Integer(value)
+        } else {
+            mlua::Value::Number(value as f64)
+        }
+    }
+    #[cfg(not(feature = "backend-luau"))]
+    {
+        mlua::Value::Integer(value as mlua::Integer)
     }
 }
 
