@@ -249,6 +249,46 @@ fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::
     }
 }
 
+fn lua_value_to_json_value(value: mlua::Value, depth: usize) -> mlua::Result<serde_json::Value> {
+    if depth > 128 {
+        return Err(mlua::Error::external(
+            "JSON encode: Lua table nesting too deep",
+        ));
+    }
+
+    match value {
+        mlua::Value::Nil => Ok(serde_json::Value::Null),
+        mlua::Value::Boolean(value) => Ok(serde_json::Value::Bool(value)),
+        mlua::Value::Integer(value) => Ok(serde_json::Value::Number(value.into())),
+        mlua::Value::Number(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| mlua::Error::external("JSON encode: invalid number")),
+        mlua::Value::String(value) => Ok(serde_json::Value::String(value.to_string_lossy())),
+        mlua::Value::Table(table) => {
+            let mut object = serde_json::Map::new();
+            for pair in table.pairs::<mlua::Value, mlua::Value>() {
+                let (key, value) = pair?;
+                if let Some(key) = lua_key_to_json_key(key) {
+                    object.insert(key, lua_value_to_json_value(value, depth + 1)?);
+                }
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        _ => Ok(serde_json::Value::Null),
+    }
+}
+
+fn lua_key_to_json_key(key: mlua::Value) -> Option<String> {
+    match key {
+        mlua::Value::String(value) => Some(value.to_string_lossy()),
+        mlua::Value::Integer(value) => Some(value.to_string()),
+        mlua::Value::Number(value) if value.fract() == 0.0 => Some((value as i64).to_string()),
+        mlua::Value::Number(value) => Some(value.to_string()),
+        mlua::Value::Boolean(value) => Some(if value { "true" } else { "false" }.to_string()),
+        _ => None,
+    }
+}
+
 fn parse_canonical_integer_key(key: &str) -> Option<i64> {
     let value = key.parse::<i64>().ok()?;
     if value.to_string() == key {
@@ -285,6 +325,7 @@ impl Interpreter {
 
         // 注册 JSON 编解码函数
         let encode = lua.create_function(|lua, value: mlua::Value| {
+            let value = lua_value_to_json_value(value, 0)?;
             let json = serde_json::to_string(&value)
                 .map_err(|e| mlua::Error::external(format!("JSON encode: {e}")))?;
             Ok(mlua::Value::String(lua.create_string(json)?))
@@ -1302,5 +1343,46 @@ impl Interpreter {
 impl Default for Interpreter {
     fn default() -> Self {
         Self::new(InterpreterConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Interpreter;
+    use crate::InterpreterConfig;
+
+    #[test]
+    fn pluto_preserves_mixed_numeric_and_string_table_keys() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                local saveslot = {
+                    [1] = { file = "save0001" },
+                    [4] = { file = "save0004" },
+                    last = 4,
+                    count = 4,
+                    check = { save0001 = true, save0004 = true },
+                }
+                local encoded = pluto.persist({}, saveslot)
+                restored_saveslot = pluto.unpersist({}, encoded)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = interpreter.lua().globals();
+        let restored: mlua::Table = globals.get("restored_saveslot").unwrap();
+        let slot1: mlua::Table = restored.get(1).unwrap();
+        let slot4: mlua::Table = restored.get(4).unwrap();
+        let check: mlua::Table = restored.get("check").unwrap();
+
+        assert_eq!(slot1.get::<String>("file").unwrap(), "save0001");
+        assert_eq!(slot4.get::<String>("file").unwrap(), "save0004");
+        assert_eq!(restored.get::<i64>("last").unwrap(), 4);
+        assert_eq!(restored.get::<i64>("count").unwrap(), 4);
+        assert!(check.get::<bool>("save0001").unwrap());
+        assert!(check.get::<bool>("save0004").unwrap());
     }
 }

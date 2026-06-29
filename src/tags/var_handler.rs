@@ -183,12 +183,13 @@ pub fn execute_var_system(
 
         "date" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
-            variables.set(&format!("{}.year", name), Value::Int(2024));
-            variables.set(&format!("{}.month", name), Value::Int(1));
-            variables.set(&format!("{}.day", name), Value::Int(1));
-            variables.set(&format!("{}.hour", name), Value::Int(0));
-            variables.set(&format!("{}.minute", name), Value::Int(0));
-            variables.set(&format!("{}.second", name), Value::Int(0));
+            let now = local_datetime();
+            variables.set(&format!("{}.year", name), Value::Int(now.year));
+            variables.set(&format!("{}.month", name), Value::Int(now.month));
+            variables.set(&format!("{}.day", name), Value::Int(now.day));
+            variables.set(&format!("{}.hour", name), Value::Int(now.hour));
+            variables.set(&format!("{}.minute", name), Value::Int(now.minute));
+            variables.set(&format!("{}.second", name), Value::Int(now.second));
         }
 
         "unixtime" => {
@@ -379,6 +380,76 @@ pub fn execute_var_system(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DateTimeParts {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+}
+
+fn local_datetime() -> DateTimeParts {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    local_datetime_from_unix(seconds).unwrap_or_else(|| utc_datetime_from_unix(seconds))
+}
+
+#[cfg(unix)]
+fn local_datetime_from_unix(seconds: i64) -> Option<DateTimeParts> {
+    let raw = seconds as libc::time_t;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let ptr = unsafe { libc::localtime_r(&raw, tm.as_mut_ptr()) };
+    if ptr.is_null() {
+        return None;
+    }
+    let tm = unsafe { tm.assume_init() };
+    Some(DateTimeParts {
+        year: i64::from(tm.tm_year) + 1900,
+        month: i64::from(tm.tm_mon) + 1,
+        day: i64::from(tm.tm_mday),
+        hour: i64::from(tm.tm_hour),
+        minute: i64::from(tm.tm_min),
+        second: i64::from(tm.tm_sec),
+    })
+}
+
+#[cfg(not(unix))]
+fn local_datetime_from_unix(_seconds: i64) -> Option<DateTimeParts> {
+    None
+}
+
+fn utc_datetime_from_unix(seconds: i64) -> DateTimeParts {
+    let days = seconds.div_euclid(86_400);
+    let secs_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    DateTimeParts {
+        year,
+        month,
+        day,
+        hour: secs_of_day / 3600,
+        minute: secs_of_day % 3600 / 60,
+        second: secs_of_day % 60,
+    }
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
 /// 删除变量树（包括子变量）
 fn delete_variable_tree(variables: &mut VariableStore, name: &str) {
     variables.remove(name);
@@ -526,5 +597,32 @@ mod tests {
         assert_eq!(vars.get("foo"), None);
         assert_eq!(vars.get("foo.bar"), None);
         assert_eq!(vars.get("foo.baz"), None);
+    }
+
+    #[test]
+    fn test_var_system_date_uses_current_clock() {
+        let mut vars = VariableStore::new();
+        let params = HashMap::from([("name".to_string(), "now".to_string())]);
+        let resolved = HashMap::new();
+
+        execute_var_system("date", &params, &resolved, &mut vars).unwrap();
+
+        let year = vars.get("now.year").and_then(Value::as_int).unwrap_or(0);
+        let month = vars.get("now.month").and_then(Value::as_int).unwrap_or(0);
+        let day = vars.get("now.day").and_then(Value::as_int).unwrap_or(0);
+        assert!(year >= 2026, "date year should come from current clock");
+        assert!((1..=12).contains(&month));
+        assert!((1..=31).contains(&day));
+    }
+
+    #[test]
+    fn utc_datetime_from_unix_splits_epoch() {
+        let epoch = utc_datetime_from_unix(0);
+        assert_eq!(epoch.year, 1970);
+        assert_eq!(epoch.month, 1);
+        assert_eq!(epoch.day, 1);
+        assert_eq!(epoch.hour, 0);
+        assert_eq!(epoch.minute, 0);
+        assert_eq!(epoch.second, 0);
     }
 }
