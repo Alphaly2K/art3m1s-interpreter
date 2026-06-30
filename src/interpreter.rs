@@ -72,7 +72,7 @@ pub struct QueuedTagDrain {
 /// 并将相关配置填入此结构体后传给解释器。
 #[derive(Debug, Clone)]
 pub struct InterpreterConfig {
-    /// 脚本字符编码（默认 UTF-8，可设为 SHIFT_JIS）
+    /// 脚本字符编码（默认 SHIFT_JIS，可设为 UTF-8）
     pub encoding: &'static encoding_rs::Encoding,
 
     /// 舞台宽度（WIDTH）
@@ -120,7 +120,7 @@ pub struct InterpreterConfig {
 impl Default for InterpreterConfig {
     fn default() -> Self {
         Self {
-            encoding: encoding_rs::UTF_8,
+            encoding: encoding_rs::SHIFT_JIS,
             stage_width: 640,
             stage_height: 480,
             fps: 60,
@@ -471,7 +471,7 @@ impl Interpreter {
 
     /// 加载脚本（从 ASB 二进制数据）
     pub fn load_asb(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        let text = asb_decrypt::decode_asb_to_string(data)?;
+        let text = asb_decrypt::decode_asb_to_string_with_encoding(data, self.config.encoding)?;
         self.load_script(name, &text)
     }
 
@@ -490,8 +490,8 @@ impl Interpreter {
         if data.len() >= 4 && &data[0..4] == b"ASB\x00" {
             self.load_asb(name, data)
         } else {
-            // 作为文本处理
-            let text = String::from_utf8_lossy(data);
+            // 作为文本处理，按 system.ini 的 CHARSET 解码。
+            let (text, _, _) = self.config.encoding.decode(data);
             self.load_script(name, &text)
         }
     }
@@ -1375,6 +1375,55 @@ mod tests {
     use std::collections::HashMap;
     #[cfg(feature = "backend-luau")]
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn load_text_file_decodes_with_configured_encoding() {
+        let mut config = InterpreterConfig::default();
+        config.encoding = encoding_rs::SHIFT_JIS;
+        let mut interpreter = Interpreter::new(config);
+        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode("*main\nこれはテストです\n");
+
+        interpreter.load_file("main.iet", &bytes).unwrap();
+
+        let script = interpreter.get_script("main.iet").unwrap();
+        assert_eq!(script.instructions[0].tag, "__text");
+        assert_eq!(script.instructions[0].get("text"), Some("これはテストです"));
+    }
+
+    #[test]
+    fn load_asb_decodes_string_fields_with_configured_encoding() {
+        let mut config = InterpreterConfig::default();
+        config.encoding = encoding_rs::SHIFT_JIS;
+        let mut interpreter = Interpreter::new(config);
+        let (value, _, _) = encoding_rs::SHIFT_JIS.encode("これはテストです");
+        let mut asb = Vec::new();
+
+        asb.extend_from_slice(b"ASB\x00");
+        asb.push(0);
+        asb.extend_from_slice(&2u32.to_le_bytes());
+        asb.extend_from_slice(&1u32.to_le_bytes());
+        asb.extend_from_slice(&4u32.to_le_bytes());
+        asb.extend_from_slice(b"main");
+        asb.push(0);
+        asb.extend_from_slice(&0u32.to_le_bytes());
+        asb.extend_from_slice(&4u32.to_le_bytes());
+        asb.extend_from_slice(b"text");
+        asb.push(0);
+        asb.extend_from_slice(&0u32.to_le_bytes());
+        asb.extend_from_slice(&1u32.to_le_bytes());
+        asb.extend_from_slice(&4u32.to_le_bytes());
+        asb.extend_from_slice(b"body");
+        asb.push(0);
+        asb.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        asb.extend_from_slice(&value);
+        asb.push(0);
+
+        interpreter.load_file("main.asb", &asb).unwrap();
+
+        let script = interpreter.get_script("main.asb").unwrap();
+        assert_eq!(script.instructions[0].tag, "text");
+        assert_eq!(script.instructions[0].get("body"), Some("これはテストです"));
+    }
 
     #[test]
     fn pluto_preserves_mixed_numeric_and_string_table_keys() {
