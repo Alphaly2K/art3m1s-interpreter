@@ -657,7 +657,7 @@ impl Interpreter {
             }
 
             // 执行标签
-            let tag_result = self.execute_tag(&instruction)?;
+            let tag_result = self.execute_tag(&instruction, true)?;
 
             match tag_result {
                 TagResult::Continue => {
@@ -762,7 +762,7 @@ impl Interpreter {
                 }
                 TagResult::Dynamic(inner_instruction) => {
                     // 动态执行另一条指令（用于 tag 标签）
-                    let inner_result = self.execute_tag(&inner_instruction)?;
+                    let inner_result = self.execute_tag(&inner_instruction, false)?;
                     // 处理内部指令的结果（不增加行号，因为外层会处理）
                     match inner_result {
                         TagResult::Continue => {
@@ -921,9 +921,9 @@ impl Interpreter {
             }
 
             // `tag` 标签自身会返回 Dynamic，需再展开一层拿到真正的指令。
-            let mut result = self.execute_tag(&instruction)?;
+            let mut result = self.execute_tag(&instruction, false)?;
             if let TagResult::Dynamic(inner) = result {
-                result = self.execute_tag(&inner)?;
+                result = self.execute_tag(&inner, false)?;
             }
 
             match result {
@@ -1034,20 +1034,26 @@ impl Interpreter {
     }
 
     /// 执行单个标签
-    fn execute_tag(&mut self, instruction: &Instruction) -> Result<TagResult> {
+    fn execute_tag(
+        &mut self,
+        instruction: &Instruction,
+        apply_tag_filter: bool,
+    ) -> Result<TagResult> {
         let script_name = self.current_script.clone().unwrap_or_default();
         let current_line = self.current_line;
         let has_builtin = self.tag_registry.contains(&instruction.tag);
 
-        // Artemis 的 tag filter 同时覆盖内建标签和游戏自定义标签。返回非零值表示
-        // Lua 已处理该标签，Rust 内建处理器必须跳过；返回 0/nil 才继续默认行为。
-        // 对没有 Rust 内建处理器的自定义标签，只要函数存在就视为已处理。
-        let filter_decision =
-            self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
-        if filter_decision == LuaTagFilterDecision::Consume
-            || (!has_builtin && filter_decision != LuaTagFilterDecision::Missing)
-        {
-            return Ok(TagResult::Continue);
+        if apply_tag_filter {
+            // 场景脚本中的标签先经过 Artemis tag filter。filter 内通过 e:tag /
+            // e:enqueueTag 生成的低层标签属于引擎直接调用，不能再次过滤，否则
+            // tags.wait -> enqueueTag{"wait"} 会无限递归。
+            let filter_decision =
+                self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
+            if filter_decision == LuaTagFilterDecision::Consume
+                || (!has_builtin && filter_decision != LuaTagFilterDecision::Missing)
+            {
+                return Ok(TagResult::Continue);
+            }
         }
 
         // calllua 会同步执行 Lua 函数，而该函数可能回调 e:var（再次锁 variables）。
@@ -1573,6 +1579,10 @@ mod tests {
                 local filter = {}
                 function filter.wt0(e, p)
                     e:enqueueTag{"wait", time=0, input=0}
+                    return 1
+                end
+                function filter.wait(e, p)
+                    e:enqueueTag{"wait", time=p.time, input=p.input}
                     return 1
                 end
                 __engine:setTagFilter(filter)
