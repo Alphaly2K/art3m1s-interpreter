@@ -302,6 +302,7 @@ impl TagRegistry {
         registry.register("lyc2", Lyc2Handler);
         registry.register("lydel", LydelHandler);
         registry.register("lyprop", LypropHandler);
+        registry.register("lyshader", LyshaderHandler);
         registry.register("se_saveok", SeSaveOkHandler);
         registry.register("se_loadok", SeLoadOkHandler);
         registry.register("se_exitok", SeExitOkHandler);
@@ -552,8 +553,12 @@ impl TagHandler for WtHandler {
         // 表示下一帧立即推进（加载序列里用作 yield 点），而非等待点击。故与
         // [wait] 一样产出 Timed，绝不能截成会阻塞点击的 Generic。
         let time = ctx.resolve_param("time")?.as_int().unwrap_or(0) as u64;
+        let input = ctx.resolve_param("input")?.as_int().unwrap_or(1) as i32;
         Ok(TagResult::Wait(Event::Wait {
-            reason: crate::event::WaitReason::Timed { milliseconds: time },
+            reason: crate::event::WaitReason::Timed {
+                milliseconds: time,
+                input,
+            },
         }))
     }
 }
@@ -575,8 +580,12 @@ struct WaitHandler;
 impl TagHandler for WaitHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let time = ctx.resolve_param("time")?.as_int().unwrap_or(0) as u64;
+        let input = ctx.resolve_param("input")?.as_int().unwrap_or(0) as i32;
         Ok(TagResult::Wait(Event::Wait {
-            reason: crate::event::WaitReason::Timed { milliseconds: time },
+            reason: crate::event::WaitReason::Timed {
+                milliseconds: time,
+                input,
+            },
         }))
     }
 }
@@ -635,8 +644,30 @@ impl TagHandler for DialogHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let title = ctx.resolve_param("title")?.as_string();
         let message = ctx.resolve_param("message")?.as_string();
+        let varname = ctx
+            .instruction
+            .get("varname")
+            .filter(|value| !value.is_empty())
+            .map(String::from);
+        let textfield = ctx
+            .instruction
+            .get("textfield")
+            .filter(|value| !value.is_empty())
+            .map(String::from);
+        let textfield_size = ctx
+            .resolve_param("textfieldsize")?
+            .as_string()
+            .parse::<usize>()
+            .ok()
+            .filter(|size| *size > 0);
 
-        Ok(TagResult::Wait(Event::ShowDialog { title, message }))
+        Ok(TagResult::Wait(Event::ShowDialog {
+            title,
+            message,
+            varname,
+            textfield,
+            textfield_size,
+        }))
     }
 }
 
@@ -769,5 +800,82 @@ struct AutoSkipDisableHandler;
 impl TagHandler for AutoSkipDisableHandler {
     fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         Ok(TagResult::Emit(Event::AutoSkipDisable))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        CallbackResult, Event, ExecutionResult, Interpreter, InterpreterConfig, WaitReason,
+    };
+
+    fn run_wait(params: &str) -> WaitReason {
+        let script = format!("*main\n[wait {params}]\n[return]\n");
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.load_script("test", &script).unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        match interpreter.run().unwrap() {
+            ExecutionResult::Wait(Event::Wait { reason }) => reason,
+            result => panic!("expected wait, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_preserves_input_policy() {
+        assert!(matches!(
+            run_wait("time=\"2500\" input=\"1\""),
+            WaitReason::Timed {
+                milliseconds: 2500,
+                input: 1,
+            }
+        ));
+        assert!(matches!(
+            run_wait("time=\"2500\""),
+            WaitReason::Timed {
+                milliseconds: 2500,
+                input: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn dialog_preserves_host_response_contract() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::ShowDialog { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                r#"
+*main
+[dialog title="Name" message="Input" varname="accepted" textfield="player" textfieldsize="10"]
+"#,
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        match interpreter.run().unwrap() {
+            ExecutionResult::Wait(Event::ShowDialog {
+                title,
+                message,
+                varname,
+                textfield,
+                textfield_size,
+            }) => {
+                assert_eq!(title, "Name");
+                assert_eq!(message, "Input");
+                assert_eq!(varname.as_deref(), Some("accepted"));
+                assert_eq!(textfield.as_deref(), Some("player"));
+                assert_eq!(textfield_size, Some(10));
+            }
+            result => panic!("expected dialog, got {result:?}"),
+        }
     }
 }

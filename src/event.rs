@@ -46,6 +46,12 @@ pub enum Event {
         title: String,
         /// 消息内容
         message: String,
+        /// 接收确定/取消结果（1/0）的变量名
+        varname: Option<String>,
+        /// 接收文本输入的变量名
+        textfield: Option<String>,
+        /// 文本输入最大字符数
+        textfield_size: Option<usize>,
     },
 
     /// 是/否选择
@@ -409,6 +415,8 @@ pub enum Event {
     },
     /// 立即反映图层变更 [flip]
     Flip,
+    /// 注册图层 HLSL shader [lyshader]
+    ShaderLoad { id: String, file: String },
     /// 截图 [takess]
     TakeScreenshot,
     /// 保存截图 [savess]
@@ -510,10 +518,12 @@ pub enum WaitReason {
         /// 按钮列表
         buttons: Vec<String>,
     },
-    /// 时间等待 [wait time="xxx"]
+    /// 时间等待 [wait time="xxx" input="x"]
     Timed {
         /// 毫秒数
         milliseconds: u64,
+        /// 输入策略：0=不接受输入，1=输入解除等待，2=跳过中不停止
+        input: i32,
     },
 }
 

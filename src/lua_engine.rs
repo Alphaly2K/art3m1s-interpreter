@@ -9,6 +9,8 @@ use mlua::{Lua, Result as LuaResult, UserData, UserDataMethods, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+pub(crate) const TAG_FILTER_REGISTRY_KEY: &str = "__art3m1s_tag_filter";
+
 /// 引擎事件回调 trait
 ///
 /// 宿主应用实现此 trait 来响应 engine 对象的方法调用。
@@ -728,8 +730,22 @@ impl UserData for EngineApi {
             Ok(())
         });
 
-        // e:setTagFilter(tags) — 参数为 Lua 表，脚本侧持有其引用；这里仅通知宿主。
-        methods.add_method("setTagFilter", |_lua, this, _tags: mlua::Value| {
+        // e:setTagFilter(tags) — Artemis 会在执行内建标签前查询该表中的同名函数。
+        // 保存调用方传入的表本身，不能假定它始终叫全局 `tags`。
+        methods.add_method("setTagFilter", |lua, this, filter: mlua::Value| {
+            match filter {
+                mlua::Value::Table(table) => {
+                    lua.set_named_registry_value(TAG_FILTER_REGISTRY_KEY, table)?;
+                }
+                mlua::Value::Nil => {
+                    lua.unset_named_registry_value(TAG_FILTER_REGISTRY_KEY)?;
+                }
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "setTagFilter expects a table or nil".to_string(),
+                    ));
+                }
+            }
             let ctx = this.ctx.lock().unwrap();
             ctx.callbacks.set_tag_filter();
             Ok(())

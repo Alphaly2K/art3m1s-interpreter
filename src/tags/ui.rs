@@ -146,6 +146,17 @@ impl TagHandler for LypropHandler {
     }
 }
 
+/// [lyshader] 注册图层 shader 标签
+pub struct LyshaderHandler;
+
+impl TagHandler for LyshaderHandler {
+    fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        let id = ctx.resolve_param_str("id")?;
+        let file = ctx.resolve_param("file")?.as_string();
+        Ok(TagResult::Emit(Event::ShaderLoad { id, file }))
+    }
+}
+
 /// [loadmask] 加载遮罩标签
 pub struct LoadMaskHandler;
 
@@ -178,5 +189,43 @@ impl TagHandler for AllDeleteHandler {
             .unwrap_or(0);
 
         Ok(TagResult::Emit(Event::AllDelete { time }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::script::Instruction;
+    use crate::variable::VariableStore;
+
+    #[test]
+    fn lyshader_emits_resolved_registration_event() {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: "lyshader".into(),
+            params: HashMap::from([
+                ("id".into(), "sepia".into()),
+                ("file".into(), "system/shader/pc/sepia.hlsl".into()),
+            ]),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+
+        let TagResult::Emit(Event::ShaderLoad { id, file }) =
+            LyshaderHandler.execute(&mut ctx).unwrap()
+        else {
+            panic!("lyshader should emit ShaderLoad");
+        };
+        assert_eq!(id, "sepia");
+        assert_eq!(file, "system/shader/pc/sepia.hlsl");
     }
 }

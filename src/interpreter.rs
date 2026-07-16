@@ -4,7 +4,7 @@
 
 use crate::error::{Error, Result};
 use crate::event::{CallbackResult, Event, EventCallback, ScriptLoader, default_callback};
-use crate::lua_engine::{DefaultEngineCallbacks, EngineContext};
+use crate::lua_engine::{DefaultEngineCallbacks, EngineContext, TAG_FILTER_REGISTRY_KEY};
 use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
@@ -162,6 +162,28 @@ pub enum ExecutionResult {
         /// 标签名
         label: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LuaTagFilterDecision {
+    Missing,
+    PassThrough,
+    Consume,
+}
+
+fn lua_filter_consumes(value: &mlua::Value) -> bool {
+    match value {
+        mlua::Value::Nil => false,
+        mlua::Value::Boolean(value) => *value,
+        mlua::Value::Integer(value) => *value != 0,
+        mlua::Value::Number(value) => *value != 0.0,
+        mlua::Value::String(value) => value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .is_some_and(|value| value != 0.0),
+        _ => true,
+    }
 }
 
 /// ASB 脚本解释器
@@ -1015,6 +1037,18 @@ impl Interpreter {
     fn execute_tag(&mut self, instruction: &Instruction) -> Result<TagResult> {
         let script_name = self.current_script.clone().unwrap_or_default();
         let current_line = self.current_line;
+        let has_builtin = self.tag_registry.contains(&instruction.tag);
+
+        // Artemis 的 tag filter 同时覆盖内建标签和游戏自定义标签。返回非零值表示
+        // Lua 已处理该标签，Rust 内建处理器必须跳过；返回 0/nil 才继续默认行为。
+        // 对没有 Rust 内建处理器的自定义标签，只要函数存在就视为已处理。
+        let filter_decision =
+            self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
+        if filter_decision == LuaTagFilterDecision::Consume
+            || (!has_builtin && filter_decision != LuaTagFilterDecision::Missing)
+        {
+            return Ok(TagResult::Continue);
+        }
 
         // calllua 会同步执行 Lua 函数，而该函数可能回调 e:var（再次锁 variables）。
         // 若在持有 variables 锁期间执行它会自锁死，故像 __lua_block 一样特判：
@@ -1039,10 +1073,7 @@ impl Interpreter {
             return Ok(TagResult::Continue);
         }
 
-        // 先获取 handler，避免借用冲突
-        let handler_result = self.tag_registry.get(&instruction.tag);
-
-        if handler_result.is_some() {
+        if has_builtin {
             // 创建上下文
             let get_script = |name: &str| -> Option<&Script> { self.scripts.get(name) };
 
@@ -1065,17 +1096,7 @@ impl Interpreter {
                 unreachable!()
             }
         } else {
-            // 未注册的标签：先尝试 Lua `tags` 表分发（游戏自定义标签，如 `msgon`、
-            // `delay0`、`btn_click` 等）。游戏脚本在 `system/extend/script.lua` 中通过
-            // `tags.<tag> = function(e, p) ... end` 注册这些处理器。
-            //
-            // 注意：不能持有 variables 锁期间调用 Lua（可能回调 e:var 再次锁），
-            // 故仿 calllua 特判——不持锁、直接调用。
-            if let Some(_result) = self.try_dispatch_lua_tag(&instruction.tag, &instruction.params)
-            {
-                return Ok(TagResult::Continue);
-            }
-            // Lua 也未注册，回退：发出自定义事件
+            // Lua filter 也未注册，回退：发出自定义事件。
             Ok(TagResult::Emit(Event::Custom {
                 tag: instruction.tag.clone(),
                 params: instruction.params.clone(),
@@ -1083,59 +1104,64 @@ impl Interpreter {
         }
     }
 
-    /// 尝试把未注册标签分发给 Lua 全局 `tags` 表中的同名函数。
+    /// 通过 `e:setTagFilter(table)` 注册的表分发标签。
     ///
     /// 游戏自定义标签（如 `msgon`、`delay0`、`btn_click` 等）在
     /// `system/extend/script.lua` 中以 `tags.<tag> = function(e, p) ... end` 注册。
     /// 引擎自身不内置这些标签，而是在此处尝试 Lua 分发。
     ///
     /// 调用签名与 `calllua` 一致：`func(__engine, param_table)`。
-    /// 返回 `true` 表示找到并执行了 Lua handler，`false` 表示无此 handler。
-    fn try_dispatch_lua_tag(&self, tag: &str, params: &HashMap<String, String>) -> Option<()> {
-        // 查找 tags.<tag> 函数，嵌套路径如 tags.msgon 走 lua 递归解析
+    /// 非零返回值表示脚本已经处理，0/nil 表示继续执行引擎默认处理。
+    fn dispatch_lua_tag_filter(
+        &self,
+        tag: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<LuaTagFilterDecision> {
+        // 查找 filter.<tag> 函数，嵌套路径如 tags.msgon 走 Lua 递归解析。
         let func: mlua::Function = {
-            let globals = self.lua.globals();
-            let tags: mlua::Table = globals.get("tags").ok()?;
+            let tags: mlua::Table = match self.lua.named_registry_value(TAG_FILTER_REGISTRY_KEY) {
+                Ok(tags) => tags,
+                Err(_) => return Ok(LuaTagFilterDecision::Missing),
+            };
             let parts: Vec<&str> = tag.split('.').collect();
-            let mut current: mlua::Value = tags.get(parts[0]).ok()?;
+            let mut current: mlua::Value = match tags.get(parts[0]) {
+                Ok(value) => value,
+                Err(_) => return Ok(LuaTagFilterDecision::Missing),
+            };
             for &part in &parts[1..] {
                 current = match current {
-                    mlua::Value::Table(t) => t.get(part).ok()?,
-                    _ => return None,
+                    mlua::Value::Table(t) => match t.get(part) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(LuaTagFilterDecision::Missing),
+                    },
+                    _ => return Ok(LuaTagFilterDecision::Missing),
                 };
             }
             match current {
                 mlua::Value::Function(f) => f,
-                _ => return None,
+                _ => return Ok(LuaTagFilterDecision::Missing),
             }
         };
 
         // 构造 param 表
-        let param_table = match self.lua.create_table() {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
+        let param_table = self.lua.create_table()?;
         for (k, v) in params {
-            let _ = param_table.set(k.as_str(), v.as_str());
+            param_table.set(k.as_str(), v.as_str())?;
         }
 
         // 获取 engine 对象
-        let engine: mlua::Value = self.lua.globals().get("__engine").ok()?;
+        let engine: mlua::Value = self.lua.globals().get("__engine")?;
 
-        let result: mlua::Result<()> = match engine {
+        let result: mlua::Value = match engine {
             mlua::Value::UserData(ud) => func.call((ud, param_table)),
             _ => func.call((param_table,)),
-        };
+        }?;
 
-        match result {
-            Ok(_) => Some(()),
-            Err(e) => {
-                if std::env::var("ART3M1S_DEBUG").is_ok() {
-                    eprintln!("[lua-tag] {tag} 执行失败: {e}");
-                }
-                None
-            }
-        }
+        Ok(if lua_filter_consumes(&result) {
+            LuaTagFilterDecision::Consume
+        } else {
+            LuaTagFilterDecision::PassThrough
+        })
     }
 
     /// 持续执行直到完成或等待
@@ -1368,9 +1394,10 @@ impl Default for Interpreter {
 #[cfg(test)]
 mod tests {
     use super::Interpreter;
-    use crate::InterpreterConfig;
+    use crate::event::WaitReason;
     #[cfg(feature = "backend-luau")]
     use crate::lua_engine::EngineCallbacks;
+    use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig};
     #[cfg(feature = "backend-luau")]
     use std::collections::HashMap;
     #[cfg(feature = "backend-luau")]
@@ -1480,6 +1507,115 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(value, 160);
+    }
+
+    fn filtered_interpreter(filter: &str, script: &str) -> Interpreter {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(filter)
+            .exec()
+            .expect("install tag filter");
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.load_script("test", script).unwrap();
+        interpreter.start("test", "main").unwrap();
+        interpreter
+    }
+
+    #[test]
+    fn tag_filter_nonzero_consumes_builtin_tag() {
+        let mut interpreter = filtered_interpreter(
+            r#"
+                local filter = {}
+                function filter.stop(e, p)
+                    assert(p["0"] == "exskip")
+                    return 1
+                end
+                __engine:setTagFilter(filter)
+            "#,
+            "*main\n[stop exskip]\n",
+        );
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Completed
+        ));
+    }
+
+    #[test]
+    fn tag_filter_zero_runs_builtin_tag() {
+        let mut interpreter = filtered_interpreter(
+            r#"
+                local filter = {}
+                function filter.stop(e, p) return 0 end
+                __engine:setTagFilter(filter)
+            "#,
+            "*main\n[stop exskip]\n",
+        );
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop {
+                    reason: Some(reason)
+                }
+            }) if reason == "exskip"
+        ));
+    }
+
+    #[test]
+    fn tag_filter_can_replace_wt0_with_queued_wait() {
+        let mut interpreter = filtered_interpreter(
+            r#"
+                local filter = {}
+                function filter.wt0(e, p)
+                    e:enqueueTag{"wait", time=0, input=0}
+                    return 1
+                end
+                __engine:setTagFilter(filter)
+            "#,
+            "*main\n[wt0]\n",
+        );
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Timed {
+                    milliseconds: 0,
+                    input: 0
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn tag_filter_nil_handles_custom_tag_without_emitting_host_event() {
+        let mut interpreter = filtered_interpreter(
+            r#"
+                local filter = {}
+                function filter.custom(e, p)
+                    custom_seen = p.value
+                end
+                __engine:setTagFilter(filter)
+            "#,
+            "*main\n[custom value=\"ok\"]\n[stop]\n",
+        );
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        let seen: String = interpreter
+            .lua()
+            .globals()
+            .get("custom_seen")
+            .expect("custom filter ran");
+        assert_eq!(seen, "ok");
     }
 
     #[cfg(feature = "backend-luau")]
