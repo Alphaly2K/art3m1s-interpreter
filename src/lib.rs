@@ -72,7 +72,10 @@ pub use event::{
 };
 pub use expression::ExpressionEvaluator;
 pub use interpreter::{CallFrame, ExecutionResult, Interpreter, InterpreterConfig};
-pub use lua_engine::{DefaultEngineCallbacks, EngineApi, EngineCallbacks, EngineContext};
+pub use lua_engine::{
+    DefaultEngineCallbacks, EmoteLayerApi, EmoteLayerCommand, EngineApi, EngineCallbacks,
+    EngineContext,
+};
 pub use r#macro::{Macro, MacroRegistry};
 pub use script::{Instruction, Script};
 pub use tags::{ExecutionContext, TagHandler, TagRegistry, TagResult};

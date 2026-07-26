@@ -11,6 +11,55 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) const TAG_FILTER_REGISTRY_KEY: &str = "__art3m1s_tag_filter";
 
+/// A typed command sent from an Artemis E-Mote layer userdata to the host.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmoteLayerCommand {
+    SetScale {
+        scale: f32,
+        origin_x: f32,
+        origin_y: f32,
+    },
+    SetCoord {
+        x: f32,
+        y: f32,
+        z: f32,
+        angle: f32,
+    },
+    SetVariable {
+        label: String,
+        value: f32,
+        frames: f32,
+        easing: u32,
+    },
+    PlayTimeline {
+        label: String,
+        flags: u32,
+    },
+    FadeInTimeline {
+        label: String,
+        frames: f32,
+        easing: u32,
+    },
+    FadeOutTimeline {
+        label: String,
+        frames: f32,
+        easing: u32,
+    },
+    StopTimeline {
+        label: String,
+    },
+    Pass,
+    Step,
+    Skip,
+}
+
+fn unsupported_emote() -> crate::Error {
+    crate::Error::RuntimeError {
+        line: 0,
+        message: "E-Mote host callbacks are not installed".to_string(),
+    }
+}
+
 /// 引擎事件回调 trait
 ///
 /// 宿主应用实现此 trait 来响应 engine 对象的方法调用。
@@ -149,6 +198,32 @@ pub trait EngineCallbacks: Send + Sync {
     /// 是否仍有 surface 在异步加载中。默认 false（无后端即视为加载完成）。
     fn is_loading_surface(&self) -> bool {
         false
+    }
+
+    /// Creates the pending E-Mote model for a scene layer.
+    fn create_emote_layer(
+        &self,
+        _id: &str,
+        _files: &[String],
+        _width: u32,
+        _height: u32,
+    ) -> crate::Result<bool> {
+        Err(unsupported_emote())
+    }
+
+    /// Resolves the requested E-Mote layer and returns its actual slot selector.
+    fn get_emote_layer(&self, _id: &str, _next: bool) -> Option<bool> {
+        None
+    }
+
+    /// Applies one operation to the current or pending E-Mote layer.
+    fn command_emote_layer(
+        &self,
+        _id: &str,
+        _next: bool,
+        _command: EmoteLayerCommand,
+    ) -> crate::Result<()> {
+        Err(unsupported_emote())
     }
 }
 
@@ -297,6 +372,95 @@ impl EngineApi {
                 None
             }
         }
+    }
+}
+
+/// Script-visible E-Mote layer handle.
+///
+/// The userdata intentionally stores only a logical layer id and current/next
+/// selector. Model ownership and rendering stay in the host runtime.
+pub struct EmoteLayerApi {
+    ctx: Arc<Mutex<EngineContext>>,
+    id: String,
+    next: bool,
+}
+
+impl EmoteLayerApi {
+    fn command(&self, command: EmoteLayerCommand) -> LuaResult<()> {
+        let ctx = self.ctx.lock().unwrap();
+        ctx.callbacks
+            .command_emote_layer(&self.id, self.next, command)
+            .map_err(mlua::Error::external)
+    }
+}
+
+impl UserData for EmoteLayerApi {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "setScale",
+            |_lua, this, (scale, origin_x, origin_y): (f32, f32, f32)| {
+                this.command(EmoteLayerCommand::SetScale {
+                    scale,
+                    origin_x,
+                    origin_y,
+                })
+            },
+        );
+        methods.add_method(
+            "setCoord",
+            |_lua, this, (x, y, z, angle): (f32, f32, f32, f32)| {
+                this.command(EmoteLayerCommand::SetCoord { x, y, z, angle })
+            },
+        );
+        methods.add_method(
+            "setVariable",
+            |_lua, this, (label, value, frames, easing): (String, f32, f32, u32)| {
+                this.command(EmoteLayerCommand::SetVariable {
+                    label,
+                    value,
+                    frames,
+                    easing,
+                })
+            },
+        );
+        methods.add_method(
+            "playTimeline",
+            |_lua, this, (label, flags): (String, u32)| {
+                this.command(EmoteLayerCommand::PlayTimeline { label, flags })
+            },
+        );
+        methods.add_method(
+            "fadeInTimeline",
+            |_lua, this, (label, frames, easing): (String, f32, u32)| {
+                this.command(EmoteLayerCommand::FadeInTimeline {
+                    label,
+                    frames,
+                    easing,
+                })
+            },
+        );
+        methods.add_method(
+            "fadeOutTimeline",
+            |_lua, this, (label, frames, easing): (String, f32, u32)| {
+                this.command(EmoteLayerCommand::FadeOutTimeline {
+                    label,
+                    frames,
+                    easing,
+                })
+            },
+        );
+        methods.add_method("stopTimeline", |_lua, this, label: String| {
+            this.command(EmoteLayerCommand::StopTimeline { label })
+        });
+        methods.add_method("pass", |_lua, this, _: ()| {
+            this.command(EmoteLayerCommand::Pass)
+        });
+        methods.add_method("step", |_lua, this, _: ()| {
+            this.command(EmoteLayerCommand::Step)
+        });
+        methods.add_method("skip", |_lua, this, _: ()| {
+            this.command(EmoteLayerCommand::Skip)
+        });
     }
 }
 
@@ -646,20 +810,38 @@ impl UserData for EngineApi {
             Ok((x, y))
         });
 
-        // e:file{command="copy", src="...", dst="..."}
-        methods.add_method("file", |_lua, this, args: mlua::MultiValue| {
-            if let Some(Value::Table(t)) = args.into_iter().next() {
-                let command: String = t.get("command").unwrap_or_default();
-                let mut params = HashMap::new();
-                for pair in t.pairs::<String, String>() {
-                    if let Ok((k, v)) = pair {
-                        params.insert(k, v);
+        // e:file("path") -> file bytes as a Lua string
+        // e:file{command="copy", src="...", dst="..."} -> file operation
+        methods.add_method("file", |lua, this, args: mlua::MultiValue| {
+            match args.into_iter().next() {
+                Some(Value::String(path)) => {
+                    let path = path.to_str()?.to_owned();
+                    let reader = {
+                        let ctx = this.ctx.lock().unwrap();
+                        ctx.file_reader.clone()
+                    };
+                    let Some(reader) = reader else {
+                        return Ok(Value::Nil);
+                    };
+                    match reader(&path) {
+                        Ok(bytes) => Ok(Value::String(lua.create_string(&bytes)?)),
+                        Err(_) => Ok(Value::Nil),
                     }
                 }
-                let ctx = this.ctx.lock().unwrap();
-                ctx.callbacks.file_operation(&command, params);
+                Some(Value::Table(t)) => {
+                    let command: String = t.get("command").unwrap_or_default();
+                    let mut params = HashMap::new();
+                    for pair in t.pairs::<String, String>() {
+                        if let Ok((k, v)) = pair {
+                            params.insert(k, v);
+                        }
+                    }
+                    let ctx = this.ctx.lock().unwrap();
+                    ctx.callbacks.file_operation(&command, params);
+                    Ok(Value::Nil)
+                }
+                _ => Ok(Value::Nil),
             }
-            Ok(())
         });
 
         // e:isFileExists("path")
@@ -925,6 +1107,43 @@ impl UserData for EngineApi {
             let ctx = this.ctx.lock().unwrap();
             Ok(ctx.callbacks.is_loading_surface())
         });
+
+        // e:createEmoteLayer{id=, files={...}, width=, height=} -> EmoteLayer
+        methods.add_method("createEmoteLayer", |_lua, this, t: mlua::Table| {
+            let id: String = t.get("id")?;
+            let width: u32 = t.get("width")?;
+            let height: u32 = t.get("height")?;
+            let files_table: mlua::Table = t.get("files")?;
+            let files = files_table
+                .sequence_values::<String>()
+                .collect::<LuaResult<Vec<_>>>()?;
+            let next = {
+                let ctx = this.ctx.lock().unwrap();
+                ctx.callbacks
+                    .create_emote_layer(&id, &files, width, height)
+                    .map_err(mlua::Error::external)?
+            };
+            Ok(EmoteLayerApi {
+                ctx: Arc::clone(&this.ctx),
+                id,
+                next,
+            })
+        });
+
+        // e:getEmoteLayer{id=, next=true} -> EmoteLayer | nil
+        methods.add_method("getEmoteLayer", |_lua, this, t: mlua::Table| {
+            let id: String = t.get("id")?;
+            let next: bool = t.get("next").unwrap_or(false);
+            let actual_slot = {
+                let ctx = this.ctx.lock().unwrap();
+                ctx.callbacks.get_emote_layer(&id, next)
+            };
+            Ok(actual_slot.map(|next| EmoteLayerApi {
+                ctx: Arc::clone(&this.ctx),
+                id,
+                next,
+            }))
+        });
     }
 }
 
@@ -987,4 +1206,166 @@ pub fn init_lua_engine_api(lua: &Lua, ctx: Arc<Mutex<EngineContext>>) -> LuaResu
     let engine = EngineApi::new(ctx);
     lua.globals().set("__engine", engine)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct EmoteProbe {
+        created: Arc<Mutex<Vec<(String, Vec<String>, u32, u32)>>>,
+        commands: Arc<Mutex<Vec<(String, bool, EmoteLayerCommand)>>>,
+    }
+
+    impl EngineCallbacks for EmoteProbe {
+        fn debug(&self, _level: i32, _data: &str, _raw: bool) {}
+        fn enqueue_tag(&self, _tag: String, _params: HashMap<String, String>) {}
+        fn set_event_handler(&self, _handlers: HashMap<String, String>) {}
+        fn get_script_status(&self) -> u8 {
+            0
+        }
+        fn is_key_down(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_key_down_edge(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_key_up_edge(&self, _key_id: u32) -> bool {
+            false
+        }
+        fn is_decide(&self) -> bool {
+            false
+        }
+        fn get_mouse_point(&self) -> (i32, i32) {
+            (0, 0)
+        }
+        fn get_touch_count(&self) -> u32 {
+            0
+        }
+        fn get_touch_point(&self, _index: u32) -> (i32, i32) {
+            (0, 0)
+        }
+        fn is_file_exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn file_operation(&self, _command: &str, _params: HashMap<String, String>) {}
+        fn include(&self, _path: &str) {}
+        fn override_key(&self, _from: u32, _to: u32) {}
+        fn set_flick_sensitivity(&self, _sensitivity: f64) {}
+        fn get_script_block(&self) -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+            Vec::new()
+        }
+        fn get_script_wait_reason(&self) -> u8 {
+            0
+        }
+
+        fn create_emote_layer(
+            &self,
+            id: &str,
+            files: &[String],
+            width: u32,
+            height: u32,
+        ) -> crate::Result<bool> {
+            self.created
+                .lock()
+                .unwrap()
+                .push((id.to_string(), files.to_vec(), width, height));
+            Ok(false)
+        }
+
+        fn get_emote_layer(&self, id: &str, _next: bool) -> Option<bool> {
+            (id == "1.0").then_some(false)
+        }
+
+        fn command_emote_layer(
+            &self,
+            id: &str,
+            next: bool,
+            command: EmoteLayerCommand,
+        ) -> crate::Result<()> {
+            self.commands
+                .lock()
+                .unwrap()
+                .push((id.to_string(), next, command));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_string_overload_reads_project_bytes() {
+        let lua = Lua::new();
+        let mut engine_ctx = EngineContext::new(Box::new(EmoteProbe::default()));
+        engine_ctx.file_reader = Some(Arc::new(|path| {
+            if path == ":vo/sample.ogg.csv" {
+                Ok(b"0.1, 0.5, 1.0\r\n".to_vec())
+            } else {
+                Err(crate::Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    path.to_owned(),
+                )))
+            }
+        }));
+        init_lua_engine_api(&lua, Arc::new(Mutex::new(engine_ctx))).unwrap();
+
+        let (first, last): (f64, f64) = lua
+            .load(
+                r#"
+                local data = __engine:file(":vo/sample.ogg.csv")
+                local values = {}
+                for value in data:gmatch("[^,%s]+") do
+                    table.insert(values, tonumber(value))
+                end
+                return values[1], values[#values]
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!((first, last), (0.1, 1.0));
+    }
+
+    #[test]
+    fn emote_userdata_forwards_script_calls_to_host() {
+        let probe = EmoteProbe::default();
+        let observed = probe.clone();
+        let lua = Lua::new();
+        let ctx = Arc::new(Mutex::new(EngineContext::new(Box::new(probe))));
+        init_lua_engine_api(&lua, ctx).unwrap();
+        lua.load(
+            r#"
+            local layer = __engine:createEmoteLayer{
+                id="1.0",
+                files={"a.psb"},
+                width=1600,
+                height=1350,
+            }
+            layer:setScale(0.6, 0, 0)
+            layer:playTimeline("笑顔_ボイス再生用", 1)
+            local current = __engine:getEmoteLayer{id="1.0", next=true}
+            current:setVariable("face_talk", 0.5, 0, 0)
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        assert_eq!(
+            observed.created.lock().unwrap().as_slice(),
+            &[("1.0".to_string(), vec!["a.psb".to_string()], 1600, 1350)]
+        );
+        let commands = observed.commands.lock().unwrap();
+        assert_eq!(commands.len(), 3);
+        assert!(matches!(
+            commands[0].2,
+            EmoteLayerCommand::SetScale { scale, .. } if (scale - 0.6).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            commands[2].2,
+            EmoteLayerCommand::SetVariable { ref label, value, .. }
+                if label == "face_talk" && (value - 0.5).abs() < f32::EPSILON
+        ));
+    }
 }

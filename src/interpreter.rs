@@ -4,6 +4,7 @@
 
 use crate::error::{Error, Result};
 use crate::event::{CallbackResult, Event, EventCallback, ScriptLoader, default_callback};
+use crate::expression::ExpressionEvaluator;
 use crate::lua_engine::{DefaultEngineCallbacks, EngineContext, TAG_FILTER_REGISTRY_KEY};
 use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
@@ -589,7 +590,6 @@ impl Interpreter {
             if let Some(result) = self.flush_tag_queue()? {
                 return Ok(result);
             }
-
             // 走到这里说明队列已抽干，接下来执行的是脚本流里的内联指令；它若产生
             // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
             // 越过它。故在此把来源标记清为「非排队」。
@@ -666,6 +666,10 @@ impl Interpreter {
                 }
                 TagResult::Jump(line) => {
                     self.current_line = line;
+                    continue;
+                }
+                TagResult::JumpExternal { file, label } => {
+                    self.jump_to_external_script(&file, &label)?;
                     continue;
                 }
                 TagResult::Call {
@@ -771,6 +775,10 @@ impl Interpreter {
                         }
                         TagResult::Jump(line) => {
                             self.current_line = line;
+                            continue;
+                        }
+                        TagResult::JumpExternal { file, label } => {
+                            self.jump_to_external_script(&file, &label)?;
                             continue;
                         }
                         TagResult::Wait(event) => {
@@ -953,9 +961,8 @@ impl Interpreter {
                     }
                     continue;
                 }
-                // Lua 也会通过 eqtag/enqueueTag 排入控制流标签，最典型的是
-                // `eqtag{"jump", file=..., label="game_start"}`（跨脚本跳转返回
-                // TagResult::Call）。必须落实位置变更，否则 boot 推进不到 game_start。
+                // Lua 也会通过 eqtag/enqueueTag 排入控制流标签，必须落实其中的
+                // jump/call/return 位置变更，否则 boot 无法推进到 game_start。
                 // 改动 current_script/current_line 后继续抽干队列；flush 返回后
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
@@ -965,6 +972,11 @@ impl Interpreter {
                     // 等函数调用仍有效（典型：fn.push 的 jump 和按钮点击 handler
                     // 先后入队，jump 先于 handler 被抽到，若此时 return 则 handler
                     // 被延迟到 jump 后的脚本上下文才执行，导致 dialog 返回值丢失）。
+                    continue;
+                }
+                TagResult::JumpExternal { file, label } => {
+                    self.last_flush_changed_position = true;
+                    self.jump_to_external_script(&file, &label)?;
                     continue;
                 }
                 TagResult::Call {
@@ -1060,22 +1072,43 @@ impl Interpreter {
         // 若在持有 variables 锁期间执行它会自锁死，故像 __lua_block 一样特判：
         // 不持 variables 锁、直接调用。CallLuaHandler 本身也未使用 ctx.variables。
         if instruction.tag == "calllua" {
-            let function_name = instruction.get("function").unwrap_or("");
-            if function_name.is_empty() {
+            let raw_function_name = instruction.get("function").unwrap_or("");
+            if raw_function_name.trim().is_empty() {
+                // Lua frequently builds optional callbacks with
+                // `e:tag{"calllua", function = maybe_nil}`.  A nil value is
+                // omitted while converting the Lua table, so queued engine
+                // tags may legitimately have no function at all.  Keep a
+                // malformed source `[calllua]` visible as an error.
+                if !apply_tag_filter {
+                    return Ok(TagResult::Continue);
+                }
                 return Err(Error::RuntimeError {
                     line: current_line,
                     message: "calllua 缺少 function 参数".to_string(),
                 });
             }
-            let mut extra_params = HashMap::new();
-            for (key, value) in &instruction.params {
-                if key != "function" {
-                    extra_params.insert(key.clone(), value.clone());
+            let (function_name, extra_params) = {
+                let variables = self.variables.lock().unwrap();
+                let evaluator = ExpressionEvaluator::new(&variables);
+                let function_name = evaluator.resolve_param_str(raw_function_name)?;
+                let mut extra_params = HashMap::new();
+                for (key, value) in &instruction.params {
+                    if key != "function" {
+                        extra_params
+                            .insert(key.clone(), evaluator.resolve_param(value)?.as_string());
+                    }
                 }
+                (function_name, extra_params)
+            };
+            if function_name.is_empty() {
+                // Artemis uses dynamic calllua expressions as optional callbacks.
+                // An unset `$t.lua` therefore means "nothing to call", not a
+                // malformed source tag.
+                return Ok(TagResult::Continue);
             }
             // 关键：不持 variables 锁。call_lua_function 同步执行的 Lua 可能回调
             // e:var（经共享句柄再次锁 variables），持锁会在非可重入 Mutex 上自锁死。
-            crate::tags::call_lua_function(&self.lua, function_name, &extra_params)?;
+            crate::tags::call_lua_function(&self.lua, &function_name, &extra_params)?;
             return Ok(TagResult::Continue);
         }
 
@@ -1108,6 +1141,19 @@ impl Interpreter {
                 params: instruction.params.clone(),
             }))
         }
+    }
+
+    fn jump_to_external_script(&mut self, file: &str, label: &str) -> Result<()> {
+        self.load_external_script(file)?;
+        let target_line = self
+            .scripts
+            .get(file)
+            .ok_or_else(|| Error::ScriptNotFound(file.to_string()))?
+            .get_label_line(label)
+            .ok_or_else(|| Error::LabelNotFound(label.to_string()))?;
+        self.current_script = Some(file.to_string());
+        self.current_line = target_line;
+        Ok(())
     }
 
     /// 通过 `e:setTagFilter(table)` 注册的表分发标签。
@@ -1213,6 +1259,30 @@ impl Interpreter {
             crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
         }
         Ok(())
+    }
+
+    /// Runs `onSave` and applies only the tags produced by that handler.
+    ///
+    /// A numbered save can be emitted while the save dialog still has return,
+    /// jump, and reload tags queued.  Draining the shared queue here would run
+    /// that UI continuation reentrantly and leave the scenario at the wrong
+    /// stop.  Temporarily isolating the queue keeps the snapshot serialization
+    /// synchronous without consuming the surrounding script flow.
+    pub fn fire_save_handler_and_flush(&mut self) -> Result<()> {
+        let pending = {
+            let mut ctx = self.engine_ctx.lock().unwrap();
+            std::mem::take(&mut ctx.tag_queue)
+        };
+
+        let result = self
+            .fire_save_handler()
+            .and_then(|()| self.flush_tag_queue().map(|_| ()));
+
+        let mut ctx = self.engine_ctx.lock().unwrap();
+        let mut generated_leftovers = std::mem::take(&mut ctx.tag_queue);
+        generated_leftovers.extend(pending);
+        ctx.tag_queue = generated_leftovers;
+        result
     }
 
     /// 触发读档后的 `onLoad` 处理器（脚本中通过 `e:setEventHandler{onLoad=...}` 注册）。
@@ -1403,8 +1473,7 @@ mod tests {
     use crate::event::WaitReason;
     #[cfg(feature = "backend-luau")]
     use crate::lua_engine::EngineCallbacks;
-    use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig};
-    #[cfg(feature = "backend-luau")]
+    use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
     #[cfg(feature = "backend-luau")]
     use std::sync::{Arc, Mutex};
@@ -1529,6 +1598,194 @@ mod tests {
         interpreter.load_script("test", script).unwrap();
         interpreter.start("test", "main").unwrap();
         interpreter
+    }
+
+    #[test]
+    fn calllua_resolves_dynamic_function_and_parameters() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function dialog_return(e, p)
+                    dynamic_call_result = p.value
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_variable("t.lua", Value::String("dialog_return".into()));
+        interpreter.set_variable("t.value", Value::String("resolved".into()));
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[calllua function=\"$t.lua\" value=\"$t.value\"]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Completed
+        ));
+        assert_eq!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<String>("dynamic_call_result")
+                .unwrap(),
+            "resolved"
+        );
+    }
+
+    #[test]
+    fn calllua_treats_an_unset_dynamic_function_as_optional() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function after_optional_call(e)
+                    optional_call_continued = true
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_variable("t.lua", Value::String(String::new()));
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[calllua function=\"$t.lua\"]\n[calllua function=\"after_optional_call\"]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Completed
+        ));
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("optional_call_continued")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn queued_calllua_without_function_is_an_optional_callback() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        {
+            let ctx = interpreter.engine_context();
+            ctx.lock()
+                .unwrap()
+                .tag_queue
+                .push(("calllua".into(), HashMap::new()));
+        }
+        interpreter.load_script("test", "*main\n[stop]\n").unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        interpreter.run().unwrap();
+    }
+
+    #[test]
+    fn save_handler_flush_preserves_the_existing_control_flow_queue() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function store_for_test(e)
+                    e:tag{"var", name="g.saved", data="yes"}
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        {
+            let ctx = interpreter.engine_context();
+            let mut ctx = ctx.lock().unwrap();
+            ctx.event_handlers
+                .insert("onSave".into(), "store_for_test".into());
+            ctx.tag_queue.push((
+                "jump".into(),
+                HashMap::from([("label".into(), "after_save".into())]),
+            ));
+        }
+        interpreter
+            .load_script("test", "*main\n[stop]\n*after_save\n[stop]\n")
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        interpreter.fire_save_handler_and_flush().unwrap();
+
+        assert_eq!(
+            interpreter.variables().get("g.saved"),
+            Some(&Value::String("yes".into()))
+        );
+        let ctx = interpreter.engine_context();
+        let queue = &ctx.lock().unwrap().tag_queue;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].0, "jump");
+    }
+
+    #[test]
+    fn queued_dialog_return_reaches_the_followup_callback() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function open_dialog(e)
+                    e:tag{"call", file="ui", label="dialog"}
+                end
+                function close_dialog(e)
+                    local stack = e:getScriptStack()
+                    for i = table.maxn(stack), 1, -1 do
+                        if stack[i].file == "" then e:tag{"return"} else break end
+                    end
+                    e:tag{"var", name="t.lua", data="dialog_return"}
+                    e:tag{"jump", file="ui", label="return_ui"}
+                end
+                function dialog_return(e)
+                    dialog_closed = true
+                end
+                function backlog_jump(e)
+                    backlog_jump_ran = true
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "main",
+                "*main\n[calllua function=\"open_dialog\"]\n[calllua function=\"backlog_jump\"]\n[stop]\n",
+            )
+            .unwrap();
+        interpreter
+            .load_script(
+                "ui",
+                "*dialog\n[calllua function=\"close_dialog\"]\n[stop]\n*return_ui\n[calllua function=\"$t.lua\"]\n[return]\n",
+            )
+            .unwrap();
+        interpreter.start("main", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        let globals = interpreter.lua().globals();
+        assert!(globals.get::<bool>("dialog_closed").unwrap());
+        assert!(globals.get::<bool>("backlog_jump_ran").unwrap());
     }
 
     #[test]

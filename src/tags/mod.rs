@@ -41,6 +41,8 @@ pub enum TagResult {
     Continue,
     /// 跳转到指定行
     Jump(usize),
+    /// 跨脚本跳转，不压入返回地址
+    JumpExternal { file: String, label: String },
     /// 调用标签（压入返回地址）
     Call {
         /// 目标脚本
@@ -483,11 +485,9 @@ impl TagHandler for JumpHandler {
 
         // 跨脚本跳转
         if let Some(file) = ctx.instruction.get("file") {
-            return Ok(TagResult::Call {
-                file: Some(file.to_string()),
+            return Ok(TagResult::JumpExternal {
+                file: file.to_string(),
                 label: label.to_string(),
-                return_line: ctx.current_line,
-                return_script: ctx.current_script.to_string(),
             });
         }
 
