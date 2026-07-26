@@ -143,7 +143,14 @@ impl MacroRegistry {
             let mut new_inst = inst.clone();
 
             // 替换参数中的变量引用
-            for (_key, value) in &mut new_inst.params {
+            for (key, value) in &mut new_inst.params {
+                // estimate/cond 是表达式参数：其中的 $param 必须保留给表达式
+                // 求值器按变量解析（宏实参会同步落入变量存储）。若在此做纯文本
+                // 替换，`$pos == 'left'` 会变成 `center == 'left'`，裸标识符无法
+                // 正确求值（docs/spec/macro.md：宏参数自动展开为变量）。
+                if key == "estimate" || key == "cond" {
+                    continue;
+                }
                 // 替换所有 $param_name 形式的引用
                 let mut result = String::new();
                 let mut chars = value.chars().peekable();
@@ -252,5 +259,31 @@ mod tests {
         let expanded = registry.expand("test_macro", &args).unwrap();
         assert_eq!(expanded.len(), 1);
         assert_eq!(expanded[0].get("data"), Some("'Hello' + ' ' + 'World'"));
+    }
+
+    #[test]
+    fn test_macro_expansion_keeps_expression_params_intact() {
+        // estimate/cond 表达式中的 $param 必须原样保留，交由表达式求值器
+        // 按变量解析（宏实参会同步写入变量存储）。
+        let content = r#"
+*chara
+[if estimate="$pos == 'left'"]
+    [lyc id="1" file="$pos"]
+[/if]
+[jump cond="$pos == 'right'" label="r"]
+[return]
+"#;
+
+        let script = Script::parse("test", content).unwrap();
+        let mut registry = MacroRegistry::new();
+        registry.load_from_script(&script).unwrap();
+
+        let mut args = HashMap::new();
+        args.insert("pos".to_string(), "center".to_string());
+
+        let expanded = registry.expand("chara", &args).unwrap();
+        assert_eq!(expanded[0].get("estimate"), Some("$pos == 'left'"));
+        assert_eq!(expanded[1].get("file"), Some("center"));
+        assert_eq!(expanded[3].get("cond"), Some("$pos == 'right'"));
     }
 }

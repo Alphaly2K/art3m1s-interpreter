@@ -1,9 +1,15 @@
 //! 脚本解析与表示
 //!
 //! 解析 ASB 脚本文本，生成可执行的指令序列。
+//! 解析前先经过预处理器（&autoinsert / &linetag / &scpsupport，见
+//! [`preprocess`] 模块），预处理保持行号一一对应。
+
+pub mod preprocess;
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;
+
+pub use preprocess::TagIni;
 
 /// 单条指令
 #[derive(Debug, Clone)]
@@ -54,7 +60,33 @@ pub struct Script {
 
 impl Script {
     /// 从文本解析脚本
+    ///
+    /// 若脚本包含预处理指令（[&autoinsert]/[&linetag]/[&scpsupport]），
+    /// 先经预处理管线变换（引用全局注册的 tag.ini，见
+    /// [`preprocess::install_tag_ini`]），再解析。预处理是「一行进一行出」，
+    /// 指令行号不受影响。
     pub fn parse(name: &str, content: &str) -> Result<Self> {
+        // 快路径：预处理指令都以 "[&" 开头，全文没有就跳过整条管线
+        if !content.contains("[&") {
+            return Self::parse_preprocessed(name, content);
+        }
+        let pre =
+            preprocess::with_global_tag_ini(|ini| preprocess::preprocess(content, ini));
+        Self::parse_preprocessed(name, &pre)
+    }
+
+    /// 从文本解析脚本，显式指定 tag.ini（绕开全局注册表；测试/宿主定制用）
+    pub fn parse_with_tag_ini(
+        name: &str,
+        content: &str,
+        tag_ini: Option<&TagIni>,
+    ) -> Result<Self> {
+        let pre = preprocess::preprocess(content, tag_ini);
+        Self::parse_preprocessed(name, &pre)
+    }
+
+    /// 解析已完成预处理的脚本文本
+    fn parse_preprocessed(name: &str, content: &str) -> Result<Self> {
         let mut labels = HashMap::new();
         let mut instructions = Vec::new();
 
@@ -87,12 +119,36 @@ impl Script {
                 continue;
             }
 
-            // 指令解析 - 一行中可能有多个标签
+            // 指令解析 - 一行中可能混合多个标签与剧情文本段
+            // （Artemis 语义：未被 [ 和 ] 包围的部分都是剧情文本，见
+            // docs/spec/script_syntax.md；预处理器注入的
+            // [onlinehead]text[onlineend] 也依赖此规则）
             if line.contains('[') {
-                let tags = extract_tags_from_line(line);
+                let segments = split_line_segments(line);
 
-                for tag_str in tags {
-                    let inner = &tag_str[1..tag_str.len() - 1];
+                for segment in segments {
+                    let inner = match &segment {
+                        LineSegment::Tag(inner) => inner.as_str(),
+                        LineSegment::Text(text) => {
+                            let text = text.trim();
+                            if text.is_empty() {
+                                continue;
+                            }
+                            // 标签后的行内注释：// 起到行尾，剩余段全部丢弃
+                            // （保持旧解析器对尾随注释不产出文本的行为）
+                            if text.starts_with("//") {
+                                break;
+                            }
+                            let mut params = HashMap::new();
+                            params.insert("text".to_string(), text.to_string());
+                            instructions.push(Instruction {
+                                tag: "__text".to_string(),
+                                params,
+                                line: line_num,
+                            });
+                            continue;
+                        }
+                    };
 
                     // 检查是否是 [lua] 块开始
                     if inner.trim() == "lua" {
@@ -171,7 +227,14 @@ impl Script {
     }
 
     /// 获取标签对应的行号
+    ///
+    /// label 为空串表示「文件开头」：jump/call 标签的 label 参数缺省时应跳到
+    /// 文件开头（docs/tag/script/jump.md：label 缺省=默认为文件开头）。统一在
+    /// 此处兜底，使同文件跳转、跨文件跳转与调用栈路径共享同一缺省语义。
     pub fn get_label_line(&self, label: &str) -> Option<usize> {
+        if label.is_empty() {
+            return Some(0);
+        }
         self.labels.get(label).copied()
     }
 
@@ -191,43 +254,59 @@ impl Script {
     }
 }
 
-/// 从一行文本中提取所有标签（支持一行多个标签）
+/// 一行文本的组成段：标签或剧情文本
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LineSegment {
+    /// 标签内容（不含外层 `[` 和 `]`）
+    Tag(String),
+    /// 标签之外的剧情文本
+    Text(String),
+}
+
+/// 把一行文本按出现顺序切分成标签段与文本段（支持一行多个标签、
+/// 文本与标签混排）。
 ///
-/// 例如: "[if ...][load ...][/if]" -> ["[if ...]", "[load ...]", "[/if]"]
-fn extract_tags_from_line(line: &str) -> Vec<String> {
-    let mut tags = Vec::new();
+/// 例如: `[onlinehead]「ぷるぷる」@[rp]` ->
+/// `[Tag("onlinehead"), Text("「ぷるぷる」@"), Tag("rp")]`
+///
+/// 标签内的双引号字符串里允许出现 `[`/`]` 而不闭合标签（&autoinsert 的
+/// command 参数「可以包含括号」，见 docs/tag/preprocessor/autoinsert.md）。
+/// 行尾未闭合的 `[...` 按文本处理（旧实现直接丢弃，这里保守地保留为文本）。
+pub(crate) fn split_line_segments(line: &str) -> Vec<LineSegment> {
+    let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_tag = false;
+    let mut in_quote = false; // 仅在标签内部有效
 
     for ch in line.chars() {
         match ch {
-            '[' => {
-                if in_tag {
-                    // 嵌套的 '['，忽略
-                    current.push(ch);
-                } else {
-                    in_tag = true;
-                    current.clear();
-                    current.push(ch);
-                }
+            '"' if in_tag => {
+                in_quote = !in_quote;
+                current.push(ch);
             }
-            ']' => {
-                if in_tag {
-                    current.push(ch);
-                    tags.push(current.clone());
-                    current.clear();
-                    in_tag = false;
+            '[' if !in_tag => {
+                if !current.is_empty() {
+                    segments.push(LineSegment::Text(std::mem::take(&mut current)));
                 }
+                in_tag = true;
             }
-            _ => {
-                if in_tag {
-                    current.push(ch);
-                }
+            ']' if in_tag && !in_quote => {
+                segments.push(LineSegment::Tag(std::mem::take(&mut current)));
+                in_tag = false;
             }
+            _ => current.push(ch),
         }
     }
 
-    tags
+    if !current.is_empty() {
+        if in_tag {
+            // 未闭合的 '['：还原括号，按文本保留
+            current.insert(0, '[');
+        }
+        segments.push(LineSegment::Text(current));
+    }
+
+    segments
 }
 
 /// 解析指令内容
@@ -399,6 +478,118 @@ mod tests {
         let script = Script::parse("test", content).unwrap();
         assert_eq!(script.instructions[0].tag, "__text");
         assert_eq!(script.instructions[0].get("text"), Some("这是剧情文本"));
+    }
+
+    #[test]
+    fn test_get_label_line_empty_label_means_file_start() {
+        // jump/call 的 label 缺省语义：空 label 跳到文件开头（行 0）。
+        let content = r#"
+[stop]
+*main
+[jump]
+"#;
+        let script = Script::parse("test", content).unwrap();
+        assert_eq!(script.get_label_line(""), Some(0));
+        assert_eq!(script.get_label_line("main"), Some(1));
+        assert_eq!(script.get_label_line("missing"), None);
+    }
+
+    #[test]
+    fn test_mixed_text_and_tags_in_one_line() {
+        // Artemis 语义：未被 [ ] 包围的部分是剧情文本（docs/spec/script_syntax.md），
+        // 文本段与标签段按行内顺序产出指令。
+        let script = Script::parse("test", "[onlinehead]「ぷるぷる」@[rp]").unwrap();
+        let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
+        assert_eq!(tags, vec!["onlinehead", "__text", "rp"]);
+        assert_eq!(script.instructions[1].get("text"), Some("「ぷるぷる」@"));
+    }
+
+    #[test]
+    fn test_trailing_line_comment_after_tag_is_dropped() {
+        // 标签后的 // 行内注释不得变成剧情文本（保持旧解析器行为）
+        let script = Script::parse("test", "[rt] // 注释 [rp]").unwrap();
+        let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
+        assert_eq!(tags, vec!["rt"]);
+    }
+
+    #[test]
+    fn test_parse_runs_autoinsert_pipeline() {
+        // 预处理集成：blankline/linehead/lineend 注入后的指令流
+        let content = "[&autoinsert target=\"blankline\" command=\"[onblankline]\"]\n[&autoinsert target=\"linehead\" command=\"[onlinehead]\"]\n[&autoinsert target=\"lineend\" command=\"[onlineend]\"]\n[スライム]\n「ぷるぷる」\n\nおわり";
+        let script = Script::parse("test", content).unwrap();
+        let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
+        assert_eq!(
+            tags,
+            vec![
+                "スライム",
+                "onlinehead",
+                "__text",
+                "onlineend",
+                "onblankline",
+                "onlinehead",
+                "__text",
+                "onlineend",
+            ]
+        );
+        // 预处理一行进一行出：行号仍指向原始脚本
+        assert_eq!(script.instructions[0].line, 4); // [スライム]
+        assert_eq!(script.instructions[1].line, 5); // 「ぷるぷる」行
+        assert_eq!(script.instructions[4].line, 6); // 空行展开
+        assert_eq!(script.instructions[5].line, 7); // おわり行
+    }
+
+    #[test]
+    fn test_parse_runs_scpsupport_pipeline() {
+        // docs/tag/preprocessor/scpsupport.md 第二例
+        let content = "[&scpsupport mode=\"init\"]\n[&scpsupport mode=\"add\" command=\"@\"]\n[&scpsupport mode=\"add\" command=\"rp\"]\n[&scpsupport mode=\"add\" char=\"】\" command=\"rt\"]\n【スライム】\n「ぷるぷる」";
+        let script = Script::parse("test", content).unwrap();
+        let tags: Vec<&str> = script.instructions.iter().map(|i| i.tag.as_str()).collect();
+        assert_eq!(tags, vec!["__text", "rt", "__text", "rp"]);
+        assert_eq!(script.instructions[0].get("text"), Some("【スライム】"));
+        // 换行规则的 @ 并入文本段（与手写 「…」@[rp] 等价）
+        assert_eq!(script.instructions[2].get("text"), Some("「ぷるぷる」@"));
+    }
+
+    #[test]
+    fn test_parse_with_tag_ini_linetag() {
+        let ini = preprocess::TagIni::from_pairs([("chara", vec!["file", "x", "y"])]);
+        let content = "[&linetag allow=\"1\"]\nchara aya01,100,200\n「テキスト」";
+        let script = Script::parse_with_tag_ini("test", content, Some(&ini)).unwrap();
+        let inst = &script.instructions[0];
+        assert_eq!(inst.tag, "chara");
+        assert_eq!(inst.get("file"), Some("aya01"));
+        assert_eq!(inst.get("x"), Some("100"));
+        assert_eq!(inst.get("y"), Some("200"));
+        assert_eq!(script.instructions[1].tag, "__text");
+    }
+
+    #[test]
+    fn test_parse_uses_globally_installed_tag_ini() {
+        // 全局注册路径：install_tag_ini 后 Script::parse 自动引用。
+        // 注意：其它测试不依赖全局表（都用显式 API），并行下安全。
+        let ini = preprocess::TagIni::from_pairs([("gtagx", vec!["p1", "p2"])]);
+        preprocess::install_tag_ini(Some(ini));
+        let content = "[&linetag allow=\"1\"]\ngtagx v1,v2";
+        let script = Script::parse("test", content).unwrap();
+        preprocess::install_tag_ini(None);
+
+        let inst = &script.instructions[0];
+        assert_eq!(inst.tag, "gtagx");
+        assert_eq!(inst.get("p1"), Some("v1"));
+        assert_eq!(inst.get("p2"), Some("v2"));
+    }
+
+    #[test]
+    fn test_lua_block_still_parses_with_preprocessor_present() {
+        // 预处理器不得改写 lua 块内部（含空行），也不影响块收集
+        let content = "[&autoinsert target=\"blankline\" command=\"[rp]\"]\n[lua]\nlocal a = 1\n\nreturn a\n[/lua]\n[stop]";
+        let script = Script::parse("test", content).unwrap();
+        assert_eq!(script.instructions[0].tag, "__lua_block");
+        assert_eq!(
+            script.instructions[0].get("code"),
+            Some("local a = 1\n\nreturn a")
+        );
+        assert_eq!(script.instructions[1].tag, "stop");
     }
 
     #[test]

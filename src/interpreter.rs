@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::event::{CallbackResult, Event, EventCallback, ScriptLoader, default_callback};
 use crate::expression::ExpressionEvaluator;
 use crate::lua_engine::{DefaultEngineCallbacks, EngineContext, TAG_FILTER_REGISTRY_KEY};
+use crate::r#macro::MacroRegistry;
 use crate::script::{Instruction, Script};
 use crate::tags::{ExecutionContext, TagRegistry, TagResult};
 use crate::variable::{Value, VariableStore};
@@ -192,7 +193,11 @@ pub struct Interpreter {
     /// 配置
     config: InterpreterConfig,
     /// 已加载的脚本
-    scripts: HashMap<String, Script>,
+    ///
+    /// 用 `Arc<Script>` 持有：同一份脚本同时挂进
+    /// [`EngineContext::scripts_view`]，供 `e:getScriptBlock` 按 `{file, index}`
+    /// 查询指令块而不复制脚本内容。
+    scripts: HashMap<String, Arc<Script>>,
     /// 变量存储
     ///
     /// 用 `Arc<Mutex<_>>` 持有，以便与 [`EngineContext`] 共享同一份变量，使 Lua 中的
@@ -230,6 +235,26 @@ pub struct Interpreter {
     last_wait_from_queue: bool,
     last_flush_saw_return: bool,
     last_flush_changed_position: bool,
+    /// 当前指令是否经由 `TagResult::Jump` **跳转到达**（而非顺序执行到达）。
+    ///
+    /// if 链语义需要区分两种到达 [elseif]/[else] 的方式：
+    /// - if/elseif 条件为假时 Jump 落到下一个 [elseif] 行 → 正常求值；
+    /// - 前面分支已命中、执行完分支体后**顺序 fallthrough** 到达 → 剩余分支
+    ///   必须整段跳到匹配的 [/if]（否则 elseif 会被重复求值、两个分支都执行）。
+    ///
+    /// 每次 step 迭代开头消费并复位；只有 Jump 类结果会重新置位。
+    arrived_by_jump: bool,
+    /// 已执行过的 `__lua_block`（键：脚本名 + 指令下标）。
+    ///
+    /// Artemis 语义：[lua] 块在**文件加载时**执行且每块只执行一次（见
+    /// docs/tag/system/lua.md）。加载时统一执行后在此登记，行指针随后走到
+    /// __lua_block 行时据此跳过，避免重复执行。
+    executed_lua_blocks: std::collections::HashSet<(String, usize)>,
+    /// 宏注册表（docs/spec/macro.md）。执行未注册标签时先查此表，命中则以
+    /// 「call 进合成脚本」的方式展开执行（支持宏体内 if/endif 与 [return]）。
+    macros: MacroRegistry,
+    /// 宏定义文件 → 该文件注册的宏名列表。[macrodel] 按文件整体反注册。
+    macro_files: HashMap<String, Vec<String>>,
 }
 
 fn json_to_lua_value(lua: &Lua, value: serde_json::Value) -> mlua::Result<mlua::Value> {
@@ -334,6 +359,14 @@ fn parse_canonical_integer_key(key: &str) -> Option<i64> {
     } else {
         None
     }
+}
+
+/// 当前时间（毫秒），与 `e:now()` 同源，供 getScriptWaitReason 的 time 键使用。
+fn now_millis_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl Interpreter {
@@ -469,6 +502,10 @@ impl Interpreter {
             last_wait_from_queue: false,
             last_flush_saw_return: false,
             last_flush_changed_position: false,
+            arrived_by_jump: false,
+            executed_lua_blocks: std::collections::HashSet::new(),
+            macros: MacroRegistry::new(),
+            macro_files: HashMap::new(),
         }
     }
 
@@ -488,7 +525,63 @@ impl Interpreter {
     /// 加载脚本（从文本）
     pub fn load_script(&mut self, name: &str, content: &str) -> Result<()> {
         let script = Script::parse(name, content)?;
-        self.scripts.insert(name.to_string(), script);
+        self.insert_script(name.to_string(), script);
+        // Artemis 语义（docs/tag/system/lua.md）：[lua] 块在**文件加载时**执行，
+        // 与块在文件中的位置无关，且所有文件共享同一 Lua 环境、每块只执行一次。
+        // 旧实现是行指针走到 __lua_block 才执行，导致：跳转直达文件中段 label 时
+        // 其后 lua 块里定义的函数未注册；[stop]/[return] 之后的块永不执行。
+        self.run_lua_blocks_at_load(name)?;
+        Ok(())
+    }
+
+    /// 加载 tag.ini 文本，供 `&linetag` 行标签解析位置参数顺序使用。
+    ///
+    /// `&linetag` 把「以半角英数字开头的行」当作不带参数名的行标签，
+    /// 位置参数的对应关系（参数顺序）由 tag.ini 定义（见
+    /// docs/tag/preprocessor/linetag.md）。宿主/引擎在启动阶段读到 tag.ini
+    /// 文本后调用本方法，即把 [`TagIni::parse`] 的结果装进全局预处理器，
+    /// 之后 `Script::parse` 就能在预处理阶段展开行标签。
+    ///
+    /// 注意：这里安装的是**全局** tag.ini（`preprocess::install_tag_ini`），
+    /// 因此需在后续 `load_script`/`load_asb` 之前调用才对这些脚本生效。
+    pub fn load_tag_ini(&mut self, content: &str) {
+        let ini = crate::script::preprocess::TagIni::parse(content);
+        crate::script::preprocess::install_tag_ini(Some(ini));
+    }
+
+    /// 登记脚本并同步共享视图（供 `e:getScriptBlock` 查询）。
+    fn insert_script(&mut self, name: String, script: Script) {
+        let script = Arc::new(script);
+        self.engine_ctx
+            .lock()
+            .unwrap()
+            .scripts_view
+            .insert(name.clone(), Arc::clone(&script));
+        self.scripts.insert(name, script);
+    }
+
+    /// 在脚本加载时统一执行其中的全部 `__lua_block`，并登记为已执行。
+    ///
+    /// 同名脚本重新加载视为全新文件：先清除旧的已执行标记再逐块执行。
+    fn run_lua_blocks_at_load(&mut self, name: &str) -> Result<()> {
+        self.executed_lua_blocks
+            .retain(|(script, _)| script != name);
+
+        let blocks: Vec<(usize, String)> = match self.scripts.get(name) {
+            Some(script) => script
+                .instructions
+                .iter()
+                .enumerate()
+                .filter(|(_, inst)| inst.tag == "__lua_block")
+                .map(|(idx, inst)| (idx, inst.get("code").unwrap_or("").to_string()))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        for (idx, code) in blocks {
+            self.lua.load(&code).exec().map_err(Error::LuaError)?;
+            self.executed_lua_blocks.insert((name.to_string(), idx));
+        }
         Ok(())
     }
 
@@ -578,12 +671,25 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack.clear();
+        // 显式定位属于「顺序到达」，清掉可能残留的跳转到达标记。
+        self.arrived_by_jump = false;
 
         Ok(())
     }
 
     /// 执行到下一个等待点（迭代版本，避免栈溢出）
     pub fn step(&mut self) -> Result<ExecutionResult> {
+        // 进入执行即视为旧等待已结束：清掉 getScriptWaitReason 的数据源，
+        // 返回新的 Wait 时再写入（等待期间宿主不会调 step，信息保持可读）。
+        self.engine_ctx.lock().unwrap().wait_reason_info = None;
+        let result = self.step_inner();
+        if let Ok(ExecutionResult::Wait(event)) = &result {
+            self.note_wait_reason(event);
+        }
+        result
+    }
+
+    fn step_inner(&mut self) -> Result<ExecutionResult> {
         loop {
             // 先抽干 Lua 通过 e:tag{} 排队的标签（如图层操作），它们由上一条
             // [calllua]/[lua] 产生，必须走标签管线才能发出对应事件。
@@ -594,6 +700,10 @@ impl Interpreter {
             // Wait，current_line 指向的就是该 Wait 指令本身，宿主需要 advance_line()
             // 越过它。故在此把来源标记清为「非排队」。
             self.last_wait_from_queue = false;
+
+            // 消费「经由 Jump 到达当前行」标记（见字段注释）：每条指令只用一次，
+            // 顺序推进（Continue/Wait 恢复等）不会置位。
+            let arrived_by_jump = std::mem::take(&mut self.arrived_by_jump);
 
             let script_name = match &self.current_script {
                 Some(name) => name.clone(),
@@ -621,6 +731,16 @@ impl Interpreter {
                 );
             }
 
+            // if 链 fallthrough 语义：**顺序执行**到达 [elseif]/[else]，说明前面
+            // 的分支已经命中并执行完毕，剩余分支必须整段跳过到匹配的 [/if]；
+            // 只有经由 if/elseif 条件为假的 Jump 到达时才进入正常求值派发
+            // （见 docs/tag/script/if.md 与 tags/condition.rs）。
+            if !arrived_by_jump && (instruction.tag == "elseif" || instruction.tag == "else") {
+                let endif = crate::tags::find_matching_endif(script, self.current_line)?;
+                self.current_line = endif;
+                continue;
+            }
+
             // 处理剧情文本
             if instruction.tag == "__text" {
                 let text = instruction.get("text").unwrap_or("").to_string();
@@ -645,12 +765,17 @@ impl Interpreter {
                 }
             }
 
-            // 处理 Lua 代码块
+            // 处理 Lua 代码块：已在脚本加载时统一执行（Artemis 语义，见
+            // load_script），行指针走到这里直接跳过。仅当块从未执行过时补跑
+            // 一次（向后兼容外部注入等非常规路径），绝不重复执行。
             if instruction.tag == "__lua_block" {
-                let code = instruction.get("code").unwrap_or("");
-                // 执行 Lua 代码
-                if let Err(e) = self.lua.load(code).exec() {
-                    return Err(Error::LuaError(e));
+                let key = (script_name.clone(), self.current_line);
+                if !self.executed_lua_blocks.contains(&key) {
+                    let code = instruction.get("code").unwrap_or("");
+                    if let Err(e) = self.lua.load(code).exec() {
+                        return Err(Error::LuaError(e));
+                    }
+                    self.executed_lua_blocks.insert(key);
                 }
                 self.current_line += 1;
                 continue;
@@ -665,6 +790,9 @@ impl Interpreter {
                     continue;
                 }
                 TagResult::Jump(line) => {
+                    // 标记跳转到达：if/elseif 条件为假落到 [elseif] 行时，
+                    // 下一迭代必须走正常求值而非 fallthrough 跳过。
+                    self.arrived_by_jump = true;
                     self.current_line = line;
                     continue;
                 }
@@ -774,6 +902,7 @@ impl Interpreter {
                             continue;
                         }
                         TagResult::Jump(line) => {
+                            self.arrived_by_jump = true;
                             self.current_line = line;
                             continue;
                         }
@@ -901,6 +1030,9 @@ impl Interpreter {
     /// 返回（暂停或中止），`None` 表示队列已清空、可继续正常执行。
     fn flush_tag_queue(&mut self) -> Result<Option<ExecutionResult>> {
         loop {
+            // e:setScriptStack 请求的调用栈重写在此落实——Lua 执行期间只能
+            // 记录请求，队列抽干点是回到解释器控制流后的第一个安全时机。
+            self.apply_pending_stack_override()?;
             let queued = {
                 let mut ctx = self.engine_ctx.lock().unwrap();
                 if ctx.tag_queue.is_empty() {
@@ -967,6 +1099,7 @@ impl Interpreter {
                 // step 主循环会从新位置读取指令。
                 TagResult::Jump(line) => {
                     self.last_flush_changed_position = true;
+                    self.arrived_by_jump = true;
                     self.current_line = line;
                     // 继续抽干剩余标签而非立即返回——排在 jump 之后的 calllua
                     // 等函数调用仍有效（典型：fn.push 的 jump 和按钮点击 handler
@@ -1045,6 +1178,188 @@ impl Interpreter {
         }
     }
 
+    /// 把当前调用栈 + 执行位置镜像进 [`EngineContext::script_stack`]。
+    ///
+    /// 供 `e:getScriptStack` / `e:getScriptBlock` 读取。必须在**每次进入 Lua
+    /// 之前**刷新（calllua、tag filter、onEnterFrame/onSave/onLoad 等），因为
+    /// Lua 绑定拿不到解释器自身的引用。末项为当前执行位置。
+    fn sync_script_state_to_engine(&self) {
+        let mut stack: Vec<(String, usize)> = self
+            .call_stack
+            .iter()
+            .map(|frame| (frame.script.clone(), frame.return_line))
+            .collect();
+        if let Some(current) = &self.current_script {
+            stack.push((current.clone(), self.current_line));
+        }
+        self.engine_ctx.lock().unwrap().script_stack = stack;
+    }
+
+    /// 落实 `e:setScriptStack` 的调用栈重写请求（docs/lua/engine/setScriptStack.txt）。
+    ///
+    /// 数组末帧成为当前执行位置，其余帧成为调用栈——与 getScriptStack 的
+    /// 返回形态互逆。典型用法是把栈截到 1 帧，效果等同连续执行多次 [return]。
+    fn apply_pending_stack_override(&mut self) -> Result<()> {
+        let pending = self.engine_ctx.lock().unwrap().pending_stack_override.take();
+        let Some(frames) = pending else {
+            return Ok(());
+        };
+        let Some(((top_file, top_index), rest)) = frames.split_last() else {
+            // 空数组：无处可去，忽略（脚本至少要留 1 帧）。
+            return Ok(());
+        };
+        self.call_stack = rest
+            .iter()
+            .map(|(file, index)| CallFrame {
+                script: file.clone(),
+                return_line: *index,
+            })
+            .collect();
+        if !self.scripts.contains_key(top_file) {
+            self.load_external_script(top_file)?;
+        }
+        self.current_script = Some(top_file.clone());
+        self.current_line = *top_index;
+        self.arrived_by_jump = false;
+        Ok(())
+    }
+
+    /// 把 Wait 事件的等待原因写入 [`EngineContext::wait_reason_info`]，
+    /// 作为 `e:getScriptWaitReason` 的数据源（键按文档 getScriptWaitReason.txt）。
+    fn note_wait_reason(&self, event: &Event) {
+        let Event::Wait { reason } = event else {
+            return;
+        };
+        use crate::event::WaitReason as WR;
+        let mut info = HashMap::new();
+        match reason {
+            // time 键：与 e:now() 兼容的时间戳（等待截止时刻）。
+            WR::Timed { milliseconds, .. } => {
+                let deadline = now_millis_i64().saturating_add(*milliseconds as i64);
+                info.insert("time".to_string(), deadline.to_string());
+            }
+            // scenario=1 等待文本出现缓动；2 等待消失缓动。
+            WR::ScenarioTween { mode } => match mode {
+                1 => {
+                    info.insert("textTween".to_string(), "1".to_string());
+                }
+                2 => {
+                    info.insert("textClearTween".to_string(), "1".to_string());
+                }
+                _ => {}
+            },
+            WR::Se { id, .. } => {
+                info.insert("sound".to_string(), id.clone());
+            }
+            WR::VideoLayer { id } => {
+                info.insert("video".to_string(), id.clone());
+            }
+            // @/stop 等点击类等待没有专属键（脚本以此区分 @ 与 wait 标签）。
+            _ => {}
+        }
+        self.engine_ctx.lock().unwrap().wait_reason_info = Some(info);
+    }
+
+    /// 加载宏定义文件并注册其中的全部宏（[macroadd]，docs/tag/script/macroadd.md）。
+    ///
+    /// 宏文件的每个 `*标签名 … [return]` 块成为一个可当标签调用的宏。
+    /// 返回注册的宏数量。
+    pub fn load_macro_file(&mut self, file: &str) -> Result<usize> {
+        let data: Vec<u8> = if let Some(loader) = &self.file_loader {
+            loader(file)?
+        } else if let Some(loader) = &self.script_loader {
+            loader(file)?.into_bytes()
+        } else {
+            return Err(Error::ScriptNotFound(file.to_string()));
+        };
+        let text = if data.len() >= 4 && &data[0..4] == b"ASB\x00" {
+            asb_decrypt::decode_asb_to_string_with_encoding(&data, self.config.encoding)?
+        } else {
+            let (text, _, _) = self.config.encoding.decode(&data);
+            text.into_owned()
+        };
+        let script = Script::parse(file, &text)?;
+        let names: Vec<String> = script.labels.keys().cloned().collect();
+        let count = self.macros.load_from_script(&script)?;
+        self.macro_files.insert(file.to_string(), names);
+        Ok(count)
+    }
+
+    /// 反注册宏定义文件（[macrodel]，docs/tag/script/macrodel.md）：
+    /// 该文件中定义的宏全部不再可用。
+    pub fn unload_macro_file(&mut self, file: &str) {
+        if let Some(names) = self.macro_files.remove(file) {
+            for name in names {
+                self.macros.macros.remove(&name);
+            }
+        }
+    }
+
+    /// 宏注册表（只读，供宿主/测试检查）。
+    pub fn macro_registry(&self) -> &MacroRegistry {
+        &self.macros
+    }
+
+    /// 以「call 进合成脚本」的方式展开并执行宏。
+    ///
+    /// docs/spec/macro.md：宏实参自动展开为变量（宏体内 `$param`、
+    /// `var_exist target="param"` 都按变量取用）；同时经
+    /// [`MacroRegistry::expand`] 做值参数的文本替换（estimate/cond 表达式
+    /// 除外，见 macro.rs）。展开结果拼上收尾 [return] 构成合成脚本，用
+    /// `TagResult::Call` 进入，宏体内 if/endif 与显式 [return] 都按普通
+    /// 脚本语义工作。
+    fn invoke_macro(
+        &mut self,
+        instruction: &Instruction,
+        script_name: &str,
+        current_line: usize,
+    ) -> Result<TagResult> {
+        // 实参先经表达式求值器解析（调用处可能写 `pos="$t.pos"`）。
+        let args = {
+            let variables = self.variables.lock().unwrap();
+            let evaluator = ExpressionEvaluator::new(&variables);
+            let mut args = HashMap::new();
+            for (key, value) in &instruction.params {
+                args.insert(key.clone(), evaluator.resolve_param_str(value)?);
+            }
+            args
+        };
+        let expanded = self.macros.expand(&instruction.tag, &args)?;
+
+        // 实参落为同名变量：宏体内的 $param / estimate 求值依赖它们。
+        {
+            let mut store = self.variables.lock().unwrap();
+            for (key, value) in &args {
+                store.set(key, Value::String(value.clone()));
+            }
+        }
+
+        // 合成脚本名带调用深度，避免同名宏递归调用时互相覆写返回帧内容。
+        let synth_name = format!("__macro__{}@{}", instruction.tag, self.call_stack.len());
+        let mut instructions = expanded;
+        instructions.push(Instruction {
+            tag: "return".to_string(),
+            params: HashMap::new(),
+            line: 0,
+        });
+        let script = Script {
+            name: synth_name.clone(),
+            labels: HashMap::new(),
+            instructions,
+        };
+        self.insert_script(synth_name.clone(), script);
+
+        // label 空串 = 文件开头（get_label_line 的既有缺省语义）。
+        // 内联路径返回到宏调用行的下一行；排队路径由 flush_tag_queue 的
+        // Call 分支改写 return_line，两侧语义都正确。
+        Ok(TagResult::Call {
+            file: Some(synth_name),
+            label: String::new(),
+            return_line: current_line + 1,
+            return_script: script_name.to_string(),
+        })
+    }
+
     /// 执行单个标签
     fn execute_tag(
         &mut self,
@@ -1059,6 +1374,8 @@ impl Interpreter {
             // 场景脚本中的标签先经过 Artemis tag filter。filter 内通过 e:tag /
             // e:enqueueTag 生成的低层标签属于引擎直接调用，不能再次过滤，否则
             // tags.wait -> enqueueTag{"wait"} 会无限递归。
+            // filter 是 Lua 函数，可能调用 e:getScriptStack——先刷新栈镜像。
+            self.sync_script_state_to_engine();
             let filter_decision =
                 self.dispatch_lua_tag_filter(&instruction.tag, &instruction.params)?;
             if filter_decision == LuaTagFilterDecision::Consume
@@ -1108,13 +1425,136 @@ impl Interpreter {
             }
             // 关键：不持 variables 锁。call_lua_function 同步执行的 Lua 可能回调
             // e:var（经共享句柄再次锁 variables），持锁会在非可重入 Mutex 上自锁死。
+            // Lua 内可能调用 e:getScriptStack / e:getScriptBlock，先刷新栈镜像。
+            self.sync_script_state_to_engine();
             crate::tags::call_lua_function(&self.lua, &function_name, &extra_params)?;
             return Ok(TagResult::Continue);
         }
 
+        // [macroadd]/[macrodel]：宏定义文件的注册与反注册在解释器内完成
+        // （宏表只存在于解释器，宿主没有这份数据）。文件读取失败时仅记日志，
+        // 不中断脚本——实机上宏文件缺失常见于可选补丁包。
+        if instruction.tag == "macroadd" || instruction.tag == "macrodel" {
+            let file = {
+                let variables = self.variables.lock().unwrap();
+                let evaluator = ExpressionEvaluator::new(&variables);
+                evaluator.resolve_param_str(instruction.get("file").unwrap_or(""))?
+            };
+            if !file.is_empty() {
+                if instruction.tag == "macroadd" {
+                    if let Err(e) = self.load_macro_file(&file) {
+                        let ctx = self.engine_ctx.lock().unwrap();
+                        ctx.callbacks
+                            .debug(0, &format!("macroadd 加载失败 {file}: {e}"), false);
+                    }
+                } else {
+                    self.unload_macro_file(&file);
+                }
+            }
+            return Ok(TagResult::Continue);
+        }
+
+        // `var system=get_layer_info/get_font/fullscreen/minimize`：这些查询
+        // 需要宿主回调（图层枚举 / 字体列表 / 窗口状态），在此拦截并按文档
+        // 形状写入变量；未命中（如指定 id 的图层不存在）时落回内建 stub。
+        if instruction.tag == "var"
+            && let Some(system_raw) = instruction.get("system")
+        {
+            let resolved = {
+                let variables = self.variables.lock().unwrap();
+                let evaluator = ExpressionEvaluator::new(&variables);
+                let system = evaluator.resolve_param_str(system_raw)?;
+                if matches!(
+                    system.as_str(),
+                    "get_layer_info" | "get_font" | "fullscreen" | "minimize"
+                ) {
+                    let mut resolved = HashMap::new();
+                    for (key, value) in &instruction.params {
+                        resolved.insert(key.clone(), evaluator.resolve_param_str(value)?);
+                    }
+                    resolved.insert("system".to_string(), system);
+                    Some(resolved)
+                } else {
+                    None
+                }
+            };
+            if let Some(params) = resolved {
+                // 锁序与 e:tag var 路径一致：先 engine_ctx 后 variables。
+                let ctx = self.engine_ctx.lock().unwrap();
+                let mut store = self.variables.lock().unwrap();
+                let handled = crate::lua_engine::apply_system_var_query(
+                    ctx.callbacks.as_ref(),
+                    &params,
+                    &mut store,
+                )
+                .unwrap_or(false);
+                if handled {
+                    return Ok(TagResult::Continue);
+                }
+                // 未命中：释放锁后落回下方的内建 var 处理。
+            }
+        }
+
+        // [wait] 的 scenario / se / video 参数（docs/tag/script/wait.md）：
+        // 注册表里的 WaitHandler 只解析 time/input，这里在解释器层先行拦截，
+        // 产出专用等待源。文档语义：
+        // - 指定 scenario 或 video 时 time 被忽略；
+        // - se 与 time 并用时，time 表示「从该 SE 开始播放的时刻」起算的毫秒数。
+        if instruction.tag == "wait"
+            && (instruction.has("scenario") || instruction.has("se") || instruction.has("video"))
+        {
+            let reason = {
+                let variables = self.variables.lock().unwrap();
+                let evaluator = ExpressionEvaluator::new(&variables);
+                let scenario = match instruction.get("scenario") {
+                    Some(raw) => evaluator.resolve_param(raw)?.as_int().unwrap_or(0) as i32,
+                    None => 0,
+                };
+                // ID 类参数保留字符串形态（层 ID 可能是 "1.80" 这类带尾零的路径）。
+                let video = match instruction.get("video") {
+                    Some(raw) => evaluator.resolve_param_str(raw)?,
+                    None => String::new(),
+                };
+                let se = match instruction.get("se") {
+                    Some(raw) => evaluator.resolve_param_str(raw)?,
+                    None => String::new(),
+                };
+                if scenario != 0 {
+                    crate::event::WaitReason::ScenarioTween { mode: scenario }
+                } else if !video.is_empty() {
+                    crate::event::WaitReason::VideoLayer { id: video }
+                } else if !se.is_empty() {
+                    let time = match instruction.get("time") {
+                        Some(raw) => {
+                            Some(evaluator.resolve_param(raw)?.as_int().unwrap_or(0) as u64)
+                        }
+                        None => None,
+                    };
+                    crate::event::WaitReason::Se { id: se, time }
+                } else {
+                    // scenario=0 且 se/video 为空串：回退为普通计时等待
+                    // （与 WaitHandler 行为一致）。
+                    let milliseconds = match instruction.get("time") {
+                        Some(raw) => evaluator.resolve_param(raw)?.as_int().unwrap_or(0) as u64,
+                        None => 0,
+                    };
+                    let input = match instruction.get("input") {
+                        Some(raw) => evaluator.resolve_param(raw)?.as_int().unwrap_or(0) as i32,
+                        None => 0,
+                    };
+                    crate::event::WaitReason::Timed {
+                        milliseconds,
+                        input,
+                    }
+                }
+            };
+            return Ok(TagResult::Wait(Event::Wait { reason }));
+        }
+
         if has_builtin {
             // 创建上下文
-            let get_script = |name: &str| -> Option<&Script> { self.scripts.get(name) };
+            let get_script =
+                |name: &str| -> Option<&Script> { self.scripts.get(name).map(|s| s.as_ref()) };
 
             // 锁定共享变量存储，仅在本次标签执行期间持有。非 Lua 执行类标签不会
             // 重入 e:var，故此处持锁安全（calllua 已在上面特判，不走这里）。
@@ -1134,6 +1574,10 @@ impl Interpreter {
             } else {
                 unreachable!()
             }
+        } else if self.macros.contains(&instruction.tag) {
+            // 内建与 Lua filter 都未处理：查宏表（docs/spec/macro.md），
+            // 命中则展开为合成脚本并以 call 语义执行。
+            self.invoke_macro(instruction, &script_name, current_line)
         } else {
             // Lua filter 也未注册，回退：发出自定义事件。
             Ok(TagResult::Emit(Event::Custom {
@@ -1237,6 +1681,7 @@ impl Interpreter {
             ctx.event_handlers.get("onEnterFrame").cloned()
         };
         if let Some(func) = handler {
+            self.sync_script_state_to_engine();
             crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
         }
         Ok(())
@@ -1256,6 +1701,7 @@ impl Interpreter {
             ctx.event_handlers.get("onSave").cloned()
         };
         if let Some(func) = handler {
+            self.sync_script_state_to_engine();
             crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
         }
         Ok(())
@@ -1297,6 +1743,7 @@ impl Interpreter {
             ctx.event_handlers.get("onLoad").cloned()
         };
         if let Some(func) = handler {
+            self.sync_script_state_to_engine();
             crate::tags::call_lua_function(self.lua(), &func, &HashMap::new())?;
         }
         Ok(())
@@ -1322,6 +1769,10 @@ impl Interpreter {
             Some(ExecutionResult::Completed) | None => None,
             Some(_) => None,
         };
+        if let Some(event) = &wait {
+            // 排队标签产生的新等待同样要暴露给 getScriptWaitReason。
+            self.note_wait_reason(event);
+        }
         Ok(QueuedTagDrain {
             wait,
             saw_return: self.last_flush_saw_return,
@@ -1338,6 +1789,8 @@ impl Interpreter {
     /// `current_line` 早已指向下一条待执行指令，此时再加一会越过它，故退化为空操作
     /// （仅复位标记）。
     pub fn advance_line(&mut self) {
+        // 宿主 advance = 等待结束：清掉 getScriptWaitReason 的数据源。
+        self.engine_ctx.lock().unwrap().wait_reason_info = None;
         if self.last_wait_from_queue {
             self.last_wait_from_queue = false;
             return;
@@ -1368,6 +1821,12 @@ impl Interpreter {
     pub fn boot(&mut self, script: &str) -> Result<()> {
         self.load_external_script(script)?;
 
+        // 默认宏定义文件（docs/spec/macro.md：宏写在 macro.iet；其他文件用
+        // macroadd 标签追加）。项目没有该文件属正常情况，静默忽略。
+        if !self.macro_files.contains_key("macro.iet") {
+            let _ = self.load_macro_file("macro.iet");
+        }
+
         let script_obj = self.scripts.get(script).unwrap();
         let start_label = if script_obj.get_label_line("main").is_some() {
             "main"
@@ -1380,6 +1839,7 @@ impl Interpreter {
             self.current_script = Some(script.to_string());
             self.current_line = 0;
             self.call_stack.clear();
+            self.arrived_by_jump = false;
             return Ok(());
         };
 
@@ -1402,6 +1862,7 @@ impl Interpreter {
         self.current_script = Some(script.to_string());
         self.current_line = line;
         self.call_stack = stack;
+        self.arrived_by_jump = false;
         // 重新加载目标脚本并定位到当前行
         self.load_external_script(script)?;
         Ok(())
@@ -1447,7 +1908,7 @@ impl Interpreter {
 
     /// 获取脚本
     pub fn get_script(&self, name: &str) -> Option<&Script> {
-        self.scripts.get(name)
+        self.scripts.get(name).map(|s| s.as_ref())
     }
 
     /// 设置变量
@@ -1471,11 +1932,9 @@ impl Default for Interpreter {
 mod tests {
     use super::Interpreter;
     use crate::event::WaitReason;
-    #[cfg(feature = "backend-luau")]
     use crate::lua_engine::EngineCallbacks;
     use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
-    #[cfg(feature = "backend-luau")]
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1490,6 +1949,31 @@ mod tests {
         let script = interpreter.get_script("main.iet").unwrap();
         assert_eq!(script.instructions[0].tag, "__text");
         assert_eq!(script.instructions[0].get("text"), Some("これはテストです"));
+    }
+
+    #[test]
+    fn load_tag_ini_enables_linetag_positional_params() {
+        // load_tag_ini 装入位置参数顺序表后，&linetag 才能把
+        // 「以英数字开头的行」展开成带参数名的标签（docs：linetag.md）。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.load_tag_ini("[tags]\nchara=file,x,y\n");
+
+        let content = "*main\n[&linetag allow=\"1\"]\nchara aya01,100,200\n[return]\n";
+        interpreter.load_script("main", content).unwrap();
+
+        let script = interpreter.get_script("main").unwrap();
+        // 找到展开出来的 chara 标签，校验位置参数按 tag.ini 顺序落到 file/x/y
+        let chara = script
+            .instructions
+            .iter()
+            .find(|inst| inst.tag == "chara")
+            .expect("chara 行标签应被展开为普通标签");
+        assert_eq!(chara.get("file"), Some("aya01"));
+        assert_eq!(chara.get("x"), Some("100"));
+        assert_eq!(chara.get("y"), Some("200"));
+
+        // 清理全局状态，避免影响其它测试
+        crate::script::preprocess::install_tag_ini(None);
     }
 
     #[test]
@@ -1883,6 +2367,634 @@ mod tests {
             .get("custom_seen")
             .expect("custom filter ran");
         assert_eq!(seen, "ok");
+    }
+
+    /// 构造带标记函数的解释器：`mark_head` 把全局 head_marked 置 true。
+    fn interpreter_with_head_marker() -> Interpreter {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function mark_head(e)
+                    head_marked = true
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+    }
+
+    #[test]
+    fn jump_without_label_goes_to_file_start() {
+        // docs/tag/script/jump.md：label 缺省=默认为文件开头。
+        // 历史 bug：label 缺省成空串后 get_label_line("") 必然 LabelNotFound。
+        let mut interpreter = interpreter_with_head_marker();
+        interpreter
+            .load_script(
+                "test",
+                "[calllua function=\"mark_head\"]\n[stop]\n*main\n[jump]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("head_marked")
+                .unwrap(),
+            "缺省 label 的 [jump] 应跳到文件开头执行第一条指令"
+        );
+    }
+
+    #[test]
+    fn call_without_label_goes_to_file_start_and_returns() {
+        // docs/tag/script/call.md：label 参数与 jump 相同（缺省=文件开头），
+        // 目标处 [return] 应回到 call 起始点之后。
+        let mut interpreter = interpreter_with_head_marker();
+        interpreter
+            .load_script(
+                "test",
+                "[calllua function=\"mark_head\"]\n[return]\n*main\n[call]\n[stop]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("head_marked")
+                .unwrap(),
+            "缺省 label 的 [call] 应跳到文件开头执行子例程"
+        );
+    }
+
+    #[test]
+    fn cross_file_jump_without_label_goes_to_target_file_start() {
+        // 跨文件跳转的 label 缺省分支：jump_to_external_script 同样跳到文件开头。
+        let mut interpreter = interpreter_with_head_marker();
+        interpreter
+            .load_script("other", "[calllua function=\"mark_head\"]\n[stop]\n")
+            .unwrap();
+        interpreter
+            .load_script("test", "*main\n[jump file=\"other\"]\n")
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("head_marked")
+                .unwrap(),
+            "缺省 label 的跨文件 [jump] 应落到目标文件开头"
+        );
+    }
+
+    /// 执行 `[wait {params}]` 并取回等待原因。
+    fn run_wait_reason(params: &str) -> WaitReason {
+        let script = format!("*main\n[wait {params}]\n[return]\n");
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter.load_script("test", &script).unwrap();
+        interpreter.start("test", "main").unwrap();
+        match interpreter.run().unwrap() {
+            ExecutionResult::Wait(Event::Wait { reason }) => reason,
+            other => panic!("expected wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_se_produces_se_wait_reason() {
+        // docs/tag/script/wait.md：se=STRING 等待该 SE 播放结束；
+        // 与 time 并用时表示从该 SE 开始播放的时刻起算的毫秒数。
+        assert!(matches!(
+            run_wait_reason("se=\"se1\""),
+            WaitReason::Se { ref id, time: None } if id == "se1"
+        ));
+        assert!(matches!(
+            run_wait_reason("se=\"se1\" time=\"500\""),
+            WaitReason::Se { ref id, time: Some(500) } if id == "se1"
+        ));
+    }
+
+    #[test]
+    fn wait_video_produces_video_layer_wait_reason_and_ignores_time() {
+        // video=层 ID：等待该视频层播放结束；指定 video 时 time 被忽略。
+        // 层 ID "1.80" 必须保留字符串形态（不得丢尾零）。
+        assert!(matches!(
+            run_wait_reason("video=\"1.80\" time=\"700\""),
+            WaitReason::VideoLayer { ref id } if id == "1.80"
+        ));
+    }
+
+    #[test]
+    fn wait_scenario_produces_scenario_tween_wait_reason() {
+        // scenario=1 等待场景文本出现的 Tween；2 等待隐藏的 Tween；
+        // 0（显式指定）不等待 → 回退普通计时等待。
+        assert!(matches!(
+            run_wait_reason("scenario=\"1\""),
+            WaitReason::ScenarioTween { mode: 1 }
+        ));
+        assert!(matches!(
+            run_wait_reason("scenario=\"2\""),
+            WaitReason::ScenarioTween { mode: 2 }
+        ));
+        assert!(matches!(
+            run_wait_reason("scenario=\"0\" time=\"100\" input=\"1\""),
+            WaitReason::Timed {
+                milliseconds: 100,
+                input: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn plain_wait_still_produces_timed_reason() {
+        // 回归：无 scenario/se/video 参数的 [wait] 仍走 WaitHandler 的 Timed。
+        assert!(matches!(
+            run_wait_reason("time=\"250\""),
+            WaitReason::Timed {
+                milliseconds: 250,
+                input: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn lua_blocks_execute_at_load_time_regardless_of_position() {
+        // docs/tag/system/lua.md：执行时机是文件加载时而非执行到标签处；
+        // [stop] 之后的块也必须执行（旧实现里永不执行）。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[stop]\n[lua]\nlua_load_count = (lua_load_count or 0) + 1\nfunction defined_late() return 7 end\n[/lua]\n",
+            )
+            .unwrap();
+
+        // 尚未 start/run，块已在加载时执行。
+        let globals = interpreter.lua().globals();
+        assert_eq!(globals.get::<i64>("lua_load_count").unwrap(), 1);
+        let f: mlua::Function = globals.get("defined_late").unwrap();
+        assert_eq!(f.call::<i64>(()).unwrap(), 7);
+    }
+
+    #[test]
+    fn lua_blocks_do_not_rerun_when_stepped_over() {
+        // 向后兼容：加载时已执行过的块，行指针走到时不得重复执行。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[lua]\nstep_count = (step_count or 0) + 1\n[/lua]\n[stop]\n",
+            )
+            .unwrap();
+        assert_eq!(
+            interpreter.lua().globals().get::<i64>("step_count").unwrap(),
+            1
+        );
+
+        interpreter.start("test", "main").unwrap();
+        let _ = interpreter.run().unwrap();
+
+        assert_eq!(
+            interpreter.lua().globals().get::<i64>("step_count").unwrap(),
+            1,
+            "行指针越过 __lua_block 时不得重复执行"
+        );
+    }
+
+    #[test]
+    fn functions_from_trailing_lua_block_are_available_to_earlier_lines() {
+        // 跳转直达文件中段 label 时，位于其后的 lua 块里定义的函数必须已注册。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[calllua function=\"tail_fn\"]\n[stop]\n[lua]\nfunction tail_fn(e)\n    tail_called = true\nend\n[/lua]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        let _ = interpreter.run().unwrap();
+
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("tail_called")
+                .unwrap(),
+            "文件末尾 lua 块中定义的函数应在加载时即可被前面的 [calllua] 调用"
+        );
+    }
+
+    /// docs/spec/macro.md：macro.iet 中 `*标签名…[return]` 块成为可调用宏；
+    /// 参数自动展开为变量，estimate 按变量求值。
+    #[test]
+    fn macro_from_default_file_runs_like_a_tag() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_file_loader(Box::new(|path: &str| match path {
+            "macro.iet" => Ok(concat!(
+                "*chara_a\n",
+                "[if estimate=\"$pos == 2\"]\n",
+                "[lyc id=\"3\" file=\"chara_a\"]\n",
+                "[/if]\n",
+                "[if estimate=\"$pos == 1\"]\n",
+                "[lyc id=\"1\" file=\"chara_a\"]\n",
+                "[/if]\n",
+                "[return]\n"
+            )
+            .as_bytes()
+            .to_vec()),
+            "main.iet" => Ok(b"*main\n[chara_a pos=\"2\"]\n[stop]\n".to_vec()),
+            other => Err(crate::Error::ScriptNotFound(other.to_string())),
+        }));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        interpreter.set_callback(move |event| {
+            sink.lock().unwrap().push(event.clone());
+            match event {
+                Event::Wait { .. } => CallbackResult::Pause,
+                _ => CallbackResult::Continue,
+            }
+        });
+        interpreter.boot("main.iet").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        let events = events.lock().unwrap();
+        let created: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Layer(crate::event::LayerEvent::Create { id, .. }) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, vec!["3".to_string()], "只有 center 分支应命中");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Custom { tag, .. } if tag == "chara_a")),
+            "宏命中后不得回退为 Custom 事件"
+        );
+    }
+
+    /// [macroadd] 注册新宏文件；[macrodel] 后其中的宏恢复为未知标签（Custom）。
+    #[test]
+    fn macroadd_and_macrodel_register_and_unregister_macro_files() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_file_loader(Box::new(|path: &str| match path {
+            "extra.iet" => {
+                Ok(b"*hello\n[var name=\"t.count\" data=\"$t.count + 1\"]\n[return]\n".to_vec())
+            }
+            other => Err(crate::Error::ScriptNotFound(other.to_string())),
+        }));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        interpreter.set_callback(move |event| {
+            sink.lock().unwrap().push(event.clone());
+            match event {
+                Event::Wait { .. } => CallbackResult::Pause,
+                _ => CallbackResult::Continue,
+            }
+        });
+        interpreter.set_variable("t.count", Value::Int(0));
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[macroadd file=\"extra.iet\"]\n[hello]\n[macrodel file=\"extra.iet\"]\n[hello]\n[stop]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        let _ = interpreter.run().unwrap();
+
+        assert_eq!(
+            interpreter.variables().get("t.count"),
+            Some(&Value::Int(1)),
+            "macrodel 前的调用应展开一次"
+        );
+        let customs = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Event::Custom { tag, .. } if tag == "hello"))
+            .count();
+        assert_eq!(customs, 1, "macrodel 后 [hello] 应回退为 Custom 事件");
+        assert!(!interpreter.macro_registry().contains("hello"));
+    }
+
+    /// e:getScriptStack 暴露真实调用栈；e:getScriptBlock 按 {file,index} 查块。
+    #[test]
+    fn get_script_stack_and_block_reflect_real_call_frames() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function capture_stack(e)
+                    local stacks = e:getScriptStack()
+                    stack_len = #stacks
+                    bottom_file = stacks[1].file
+                    top_file = stacks[#stacks].file
+                    local block = e:getScriptBlock(stacks[#stacks])
+                    top_command = block.command
+                    top_line = block.line
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script("main", "*main\n[call file=\"sub\" label=\"s\"]\n[stop]\n")
+            .unwrap();
+        interpreter
+            .load_script("sub", "*s\n[calllua function=\"capture_stack\"]\n[return]\n")
+            .unwrap();
+        interpreter.start("main", "main").unwrap();
+
+        let _ = interpreter.run().unwrap();
+
+        let globals = interpreter.lua().globals();
+        assert_eq!(globals.get::<i64>("stack_len").unwrap(), 2);
+        assert_eq!(globals.get::<String>("bottom_file").unwrap(), "main");
+        assert_eq!(globals.get::<String>("top_file").unwrap(), "sub");
+        assert_eq!(globals.get::<String>("top_command").unwrap(), "calllua");
+        assert_eq!(globals.get::<i64>("top_line").unwrap(), 2);
+    }
+
+    /// e:setScriptStack 截断到 1 帧 = 连续 return 的效果（setScriptStack.txt）。
+    #[test]
+    fn set_script_stack_truncation_acts_like_repeated_returns() {
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter
+            .lua()
+            .load(
+                r#"
+                function truncate(e)
+                    local stacks = e:getScriptStack()
+                    while #stacks ~= 1 do
+                        table.remove(stacks, #stacks)
+                    end
+                    e:setScriptStack(stacks)
+                end
+                function mark_after(e)
+                    after_marked = true
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[call label=\"sub\"]\n[calllua function=\"mark_after\"]\n[stop]\n*sub\n[calllua function=\"truncate\"]\n[stop]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+
+        assert!(matches!(
+            interpreter.run().unwrap(),
+            ExecutionResult::Wait(Event::Wait {
+                reason: WaitReason::Stop { .. }
+            })
+        ));
+        assert!(
+            interpreter
+                .lua()
+                .globals()
+                .get::<bool>("after_marked")
+                .unwrap(),
+            "重写栈后应回到 call 的下一行继续执行"
+        );
+        assert!(
+            interpreter.call_stack().is_empty(),
+            "截断到 1 帧后调用栈应为空"
+        );
+    }
+
+    /// getScriptWaitReason 按文档返回 table：time / textTween / sound 等键。
+    #[test]
+    fn get_script_wait_reason_returns_reason_table() {
+        // [wait time=...] → time 键为 e:now() 兼容的截止时间戳。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script("test", "*main\n[wait time=\"500\"]\n[stop]\n")
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        let _ = interpreter.run().unwrap();
+
+        let time: i64 = interpreter
+            .lua()
+            .load("return __engine:getScriptWaitReason().time")
+            .eval()
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(
+            (time - now).abs() < 10_000,
+            "time 应是 now+500ms 附近的时间戳: time={time} now={now}"
+        );
+
+        // 宿主 advance 后等待结束，表应为空。
+        interpreter.advance_line();
+        let cleared: bool = interpreter
+            .lua()
+            .load("return __engine:getScriptWaitReason().time == nil")
+            .eval()
+            .unwrap();
+        assert!(cleared);
+
+        // [wait scenario=1] → textTween=1；[wait se=...] → sound=ID。
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                "*main\n[wait scenario=\"1\"]\n[wait se=\"vo01\"]\n[stop]\n",
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        let _ = interpreter.run().unwrap();
+        let text_tween: i64 = interpreter
+            .lua()
+            .load("return __engine:getScriptWaitReason().textTween")
+            .eval()
+            .unwrap();
+        assert_eq!(text_tween, 1);
+
+        interpreter.advance_line();
+        let _ = interpreter.run().unwrap();
+        let sound: String = interpreter
+            .lua()
+            .load("return __engine:getScriptWaitReason().sound")
+            .eval()
+            .unwrap();
+        assert_eq!(sound, "vo01");
+    }
+
+    /// var system=get_layer_info 省略 id / style=map 的形状（get_layer_info.md），
+    /// 走脚本 tag 路径 + 宿主回调。
+    #[test]
+    fn var_get_layer_info_enumerates_all_layers_via_callbacks() {
+        struct LayerProbe;
+        impl EngineCallbacks for LayerProbe {
+            fn debug(&self, _l: i32, _d: &str, _r: bool) {}
+            fn enqueue_tag(&self, _t: String, _p: HashMap<String, String>) {}
+            fn set_event_handler(&self, _h: HashMap<String, String>) {}
+            fn get_script_status(&self) -> u8 {
+                0
+            }
+            fn is_key_down(&self, _k: u32) -> bool {
+                false
+            }
+            fn is_key_down_edge(&self, _k: u32) -> bool {
+                false
+            }
+            fn is_key_up_edge(&self, _k: u32) -> bool {
+                false
+            }
+            fn is_decide(&self) -> bool {
+                false
+            }
+            fn get_mouse_point(&self) -> (i32, i32) {
+                (0, 0)
+            }
+            fn get_touch_count(&self) -> u32 {
+                0
+            }
+            fn get_touch_point(&self, _i: u32) -> (i32, i32) {
+                (0, 0)
+            }
+            fn is_file_exists(&self, _p: &str) -> bool {
+                false
+            }
+            fn file_operation(&self, _c: &str, _p: HashMap<String, String>) {}
+            fn include(&self, _p: &str) {}
+            fn override_key(&self, _f: u32, _t: u32) {}
+            fn set_flick_sensitivity(&self, _s: f64) {}
+            fn get_script_block(&self) -> HashMap<String, String> {
+                HashMap::new()
+            }
+            fn get_script_stack(&self) -> Vec<HashMap<String, String>> {
+                Vec::new()
+            }
+            fn get_script_wait_reason(&self) -> u8 {
+                0
+            }
+            fn get_layer_info(&self, id: &str) -> Option<HashMap<String, String>> {
+                (id == "foo").then(|| HashMap::from([("left".to_string(), "100".to_string())]))
+            }
+            fn get_layer_info_all(&self) -> Vec<(String, HashMap<String, String>)> {
+                vec![
+                    (
+                        "bar".to_string(),
+                        HashMap::from([("top".to_string(), "100".to_string())]),
+                    ),
+                    (
+                        "foo".to_string(),
+                        HashMap::from([("left".to_string(), "100".to_string())]),
+                    ),
+                ]
+            }
+            fn get_window_state(&self) -> (bool, bool) {
+                (true, false)
+            }
+        }
+
+        let mut interpreter = Interpreter::new(InterpreterConfig::default());
+        interpreter.set_engine_callbacks(Box::new(LayerProbe));
+        interpreter.set_callback(|event| match event {
+            Event::Wait { .. } => CallbackResult::Pause,
+            _ => CallbackResult::Continue,
+        });
+        interpreter
+            .load_script(
+                "test",
+                concat!(
+                    "*main\n",
+                    "[var name=\"r\" system=\"get_layer_info\"]\n",
+                    "[var name=\"m\" system=\"get_layer_info\" style=\"map\"]\n",
+                    "[var name=\"one\" system=\"get_layer_info\" id=\"foo\"]\n",
+                    "[var name=\"fs\" system=\"fullscreen\"]\n",
+                    "[stop]\n"
+                ),
+            )
+            .unwrap();
+        interpreter.start("test", "main").unwrap();
+        let _ = interpreter.run().unwrap();
+
+        let vars = interpreter.variables();
+        // 伪数组：按 id 升序 + size。id 保持字符串形态。
+        assert_eq!(vars.get("r.0.id"), Some(&Value::String("bar".into())));
+        assert_eq!(vars.get("r.0.top"), Some(&Value::Float(100.0)));
+        assert_eq!(vars.get("r.1.id"), Some(&Value::String("foo".into())));
+        assert_eq!(vars.get("r.1.left"), Some(&Value::Float(100.0)));
+        assert_eq!(vars.get("r.size"), Some(&Value::Int(2)));
+        // map 形态：result.<id>.<prop>。
+        assert_eq!(vars.get("m.bar.top"), Some(&Value::Float(100.0)));
+        assert_eq!(vars.get("m.foo.left"), Some(&Value::Float(100.0)));
+        // 单 id：result.<prop>。
+        assert_eq!(vars.get("one.left"), Some(&Value::Float(100.0)));
+        // fullscreen 经宿主窗口状态回调。
+        assert_eq!(vars.get("fs"), Some(&Value::Int(1)));
     }
 
     #[cfg(feature = "backend-luau")]

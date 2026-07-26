@@ -159,6 +159,95 @@ impl TagHandler for LyeventHandler {
     }
 }
 
+/// legacy seton*/delon* 别名的公共实现：转发到 lyevent 机制。
+///
+/// 这些标签文档全文即"保留是为了向后兼容，请不要在将来使用它"，无参数表；
+/// 旧版语义等价于 [lyevent type=<type> mode=init/reset ...]。
+/// 参数按 lyevent 的转发规则处理：id/file/label/call/handler/penetration
+/// 为已知字段，其余参数原样收进 extra_params 由宿主透传。
+fn emit_legacy_lyevent(
+    ctx: &ExecutionContext<'_>,
+    event_type: &str,
+    mode: &str,
+) -> Result<TagResult> {
+    let id = ctx.instruction.get("id").unwrap_or("").to_string();
+    let file = ctx.instruction.get("file").map(|s| s.to_string());
+    let label = ctx.instruction.get("label").map(|s| s.to_string());
+    let call = ctx
+        .instruction
+        .get("call")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0)
+        != 0;
+    let handler = ctx.instruction.get("handler").map(|s| s.to_string());
+    let penetration = ctx
+        .instruction
+        .get("penetration")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0)
+        != 0;
+
+    let known = ["id", "file", "label", "call", "handler", "penetration"];
+    let mut extra_params = std::collections::HashMap::new();
+    for (k, v) in ctx.instruction.params.iter() {
+        if !known.contains(&k.as_str()) {
+            extra_params.insert(k.clone(), v.clone());
+        }
+    }
+
+    Ok(TagResult::Emit(Event::LayerEventHandler {
+        id,
+        event_type: event_type.to_string(),
+        mode: mode.to_string(),
+        file,
+        label,
+        call,
+        handler,
+        penetration,
+        extra_params,
+    }))
+}
+
+/// legacy [seton*] 系列：等价于 [lyevent type=<type> mode=init]
+macro_rules! legacy_seton_alias {
+    ($name:ident, $event_type:expr) => {
+        pub struct $name;
+
+        impl TagHandler for $name {
+            fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+                emit_legacy_lyevent(ctx, $event_type, "init")
+            }
+        }
+    };
+}
+
+/// legacy [delon*] 系列：等价于 [lyevent type=<type> mode=reset]
+macro_rules! legacy_delon_alias {
+    ($name:ident, $event_type:expr) => {
+        pub struct $name;
+
+        impl TagHandler for $name {
+            fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+                emit_legacy_lyevent(ctx, $event_type, "reset")
+            }
+        }
+    };
+}
+
+legacy_seton_alias!(SetOnClickHandler, "click");
+legacy_seton_alias!(SetOnDragHandler, "drag");
+legacy_seton_alias!(SetOnDragInHandler, "dragin");
+legacy_seton_alias!(SetOnDragOutHandler, "dragout");
+legacy_seton_alias!(SetOnRolloutHandler, "rollout");
+legacy_seton_alias!(SetOnRolloverHandler, "rollover");
+
+legacy_delon_alias!(DelOnClickHandler, "click");
+legacy_delon_alias!(DelOnDragHandler, "drag");
+legacy_delon_alias!(DelOnDragInHandler, "dragin");
+legacy_delon_alias!(DelOnDragOutHandler, "dragout");
+legacy_delon_alias!(DelOnRolloutHandler, "rollout");
+legacy_delon_alias!(DelOnRolloverHandler, "rollover");
+
 /// [lyrename] 图层重命名处理器
 pub struct LyrenameHandler;
 
@@ -274,6 +363,191 @@ mod tests {
             Some("mwarea_out")
         );
     }
+
+    /// 用给定参数执行单个标签处理器，返回 TagResult
+    fn exec(handler: &dyn TagHandler, tag: &str, params: &[(&str, &str)]) -> TagResult {
+        let lua = mlua::Lua::new();
+        let instruction = Instruction {
+            tag: tag.into(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            line: 1,
+        };
+        let mut variables = VariableStore::new();
+        let get_script = |_name: &str| None;
+        let mut ctx = ExecutionContext {
+            variables: &mut variables,
+            lua: &lua,
+            current_script: "test",
+            current_line: 0,
+            instruction: &instruction,
+            get_script: &get_script,
+        };
+        handler.execute(&mut ctx).unwrap()
+    }
+
+    #[test]
+    fn legacy_setonclick_forwards_to_lyevent_init() {
+        let TagResult::Emit(Event::LayerEventHandler {
+            id,
+            event_type,
+            mode,
+            label,
+            call,
+            handler,
+            extra_params,
+            ..
+        }) = exec(
+            &SetOnClickHandler,
+            "setonclick",
+            &[
+                ("id", "btn1"),
+                ("label", "on_click"),
+                ("call", "1"),
+                ("handler", "calllua"),
+                ("function", "btn_click"),
+            ],
+        )
+        else {
+            panic!("setonclick 应转发为 LayerEventHandler");
+        };
+        assert_eq!(id, "btn1");
+        assert_eq!(event_type, "click");
+        assert_eq!(mode, "init", "seton* 等价于 lyevent mode=init");
+        assert_eq!(label.as_deref(), Some("on_click"));
+        assert!(call);
+        assert_eq!(handler.as_deref(), Some("calllua"));
+        assert_eq!(
+            extra_params.get("function").map(String::as_str),
+            Some("btn_click"),
+            "未知参数按 lyevent 规则透传"
+        );
+    }
+
+    #[test]
+    fn legacy_delon_aliases_forward_to_lyevent_reset() {
+        for (handler, expected_type) in [
+            (&DelOnClickHandler as &dyn TagHandler, "click"),
+            (&DelOnDragHandler, "drag"),
+            (&DelOnDragInHandler, "dragin"),
+            (&DelOnDragOutHandler, "dragout"),
+            (&DelOnRolloutHandler, "rollout"),
+            (&DelOnRolloverHandler, "rollover"),
+        ] {
+            let TagResult::Emit(Event::LayerEventHandler {
+                id,
+                event_type,
+                mode,
+                ..
+            }) = exec(handler, "delon*", &[("id", "btn1")])
+            else {
+                panic!("delon* 应转发为 LayerEventHandler");
+            };
+            assert_eq!(id, "btn1");
+            assert_eq!(event_type, expected_type);
+            assert_eq!(mode, "reset", "delon* 等价于 lyevent mode=reset");
+        }
+    }
+
+    #[test]
+    fn legacy_seton_aliases_cover_all_types() {
+        for (handler, expected_type) in [
+            (&SetOnDragHandler as &dyn TagHandler, "drag"),
+            (&SetOnDragInHandler, "dragin"),
+            (&SetOnDragOutHandler, "dragout"),
+            (&SetOnRolloutHandler, "rollout"),
+            (&SetOnRolloverHandler, "rollover"),
+        ] {
+            let TagResult::Emit(Event::LayerEventHandler {
+                event_type, mode, ..
+            }) = exec(handler, "seton*", &[("id", "ly"), ("label", "cb")])
+            else {
+                panic!("seton* 应转发为 LayerEventHandler");
+            };
+            assert_eq!(event_type, expected_type);
+            assert_eq!(mode, "init");
+        }
+    }
+
+    #[test]
+    fn video_parses_skip_levels_delaymargin_and_mode() {
+        let TagResult::Emit(Event::VideoPlay {
+            id,
+            skip,
+            loop_play,
+            delay_margin_ms,
+            mode,
+            ..
+        }) = exec(
+            &VideoHandler,
+            "video",
+            &[
+                ("id", "1.0.mov"),
+                ("file", "fg/loop.ogv"),
+                ("skip", "2"),
+                ("delaymargin", "100"),
+                ("mode", "2"),
+            ],
+        )
+        else {
+            panic!("video 应产出 VideoPlay");
+        };
+        assert_eq!(id.as_deref(), Some("1.0.mov"));
+        assert_eq!(skip, 2, "skip=2（仅右键菜单跳过）不得与 1 混同");
+        assert!(!loop_play);
+        assert_eq!(delay_margin_ms, Some(100));
+        assert_eq!(mode, Some(2));
+
+        // 缺省：skip=1、delaymargin=-1（不跳帧 → None）
+        let TagResult::Emit(Event::VideoPlay {
+            skip,
+            delay_margin_ms,
+            mode,
+            ..
+        }) = exec(
+            &VideoHandler,
+            "video",
+            &[("file", "mov/op.mpg"), ("delaymargin", "-1")],
+        )
+        else {
+            panic!("video 应产出 VideoPlay");
+        };
+        assert_eq!(skip, 1);
+        assert_eq!(delay_margin_ms, None, "-1 归一化为 None（不跳帧）");
+        assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn videofinish_handlers_carry_layer_id() {
+        let TagResult::Emit(Event::VideoFinishHandler { id, label, call, .. }) = exec(
+            &SetOnVideofinishHandler,
+            "setonvideofinish",
+            &[("id", "1.80"), ("label", "movie_done"), ("call", "1")],
+        ) else {
+            panic!("setonvideofinish 应产出 VideoFinishHandler");
+        };
+        assert_eq!(id.as_deref(), Some("1.80"), "图层 ID 不得丢尾零");
+        assert_eq!(label.as_deref(), Some("movie_done"));
+        assert!(call);
+
+        let TagResult::Emit(Event::VideoFinishHandlerDel { id }) = exec(
+            &DelOnVideofinishHandler,
+            "delonvideofinish",
+            &[("id", "1.80")],
+        ) else {
+            panic!("delonvideofinish 应产出 VideoFinishHandlerDel");
+        };
+        assert_eq!(id.as_deref(), Some("1.80"));
+
+        let TagResult::Emit(Event::VideoFinishHandlerDel { id }) =
+            exec(&DelOnVideofinishHandler, "delonvideofinish", &[])
+        else {
+            panic!("delonvideofinish 应产出 VideoFinishHandlerDel");
+        };
+        assert_eq!(id, None);
+    }
 }
 
 /// [anime] 动画处理器
@@ -337,24 +611,37 @@ impl TagHandler for VideoHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let id = ctx.instruction.get("id").map(|s| s.to_string());
         let file = ctx.instruction.get("file").unwrap_or("").to_string();
+        // skip：0=禁止跳过 / 缺省 1=单击跳过 / 2=仅右键菜单方式跳过，保留原值
         let skip = ctx
             .instruction
             .get("skip")
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(1)
-            != 0;
+            .unwrap_or(1);
         let loop_play = ctx
             .instruction
             .get("loop")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0)
             != 0;
+        // delaymargin：Ogg Theora 视频图层跳帧阈值（毫秒）；缺省/-1=不跳帧，归一化为 None
+        let delay_margin_ms = ctx
+            .instruction
+            .get("delaymargin")
+            .and_then(|s| s.parse::<i32>().ok())
+            .filter(|v| *v >= 0);
+        // mode：仅 Windows 全屏（0=VMR-7/1=VMR-9/2=EVR），其它平台由消费端忽略
+        let mode = ctx
+            .instruction
+            .get("mode")
+            .and_then(|s| s.parse::<i32>().ok());
 
         Ok(TagResult::Emit(Event::VideoPlay {
             id,
             file,
             skip,
             loop_play,
+            delay_margin_ms,
+            mode,
         }))
     }
 }
@@ -364,6 +651,14 @@ pub struct SetOnVideofinishHandler;
 
 impl TagHandler for SetOnVideofinishHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        // id 是图层 ID（层级路径形态），用 resolve_param_str 防丢尾零
+        let id = match ctx.instruction.get("id") {
+            Some(_) => {
+                let id = ctx.resolve_param_str("id")?;
+                (!id.is_empty()).then_some(id)
+            }
+            None => None,
+        };
         let file = ctx.instruction.get("file").map(|s| s.to_string());
         let label = ctx.instruction.get("label").map(|s| s.to_string());
         let call = ctx
@@ -375,6 +670,7 @@ impl TagHandler for SetOnVideofinishHandler {
         let handler = ctx.instruction.get("handler").map(|s| s.to_string());
 
         Ok(TagResult::Emit(Event::VideoFinishHandler {
+            id,
             file,
             label,
             call,
@@ -387,8 +683,16 @@ impl TagHandler for SetOnVideofinishHandler {
 pub struct DelOnVideofinishHandler;
 
 impl TagHandler for DelOnVideofinishHandler {
-    fn execute(&self, _ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
-        Ok(TagResult::Emit(Event::VideoFinishHandlerDel))
+    fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
+        // id=待取消的图层 ID（层级路径形态），用 resolve_param_str 防丢尾零
+        let id = match ctx.instruction.get("id") {
+            Some(_) => {
+                let id = ctx.resolve_param_str("id")?;
+                (!id.is_empty()).then_some(id)
+            }
+            None => None,
+        };
+        Ok(TagResult::Emit(Event::VideoFinishHandlerDel { id }))
     }
 }
 

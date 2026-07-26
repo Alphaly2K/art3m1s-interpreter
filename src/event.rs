@@ -124,7 +124,10 @@ pub enum Event {
     /// 剧情文本
     ScenarioText { content: String, inline: bool },
     /// 换行 [rt]
-    LineBreak,
+    LineBreak {
+        /// 1 时若最后一行为空行则不换行（防止意外空行）
+        omitblankline: bool,
+    },
     /// 分页 [rp]
     PageBreak { backlog: Option<i32> },
     /// 字体设置 [font]
@@ -144,7 +147,12 @@ pub enum Event {
         file: Option<String>,
         label: Option<String>,
         link_type: i32,
+        /// type=1 时强调显示的文字颜色（RRGGBB，缺省 0x000000）
         color: Option<String>,
+        /// type=1 时强调显示的文字阴影颜色（RRGGBB，缺省 0x000000）
+        shadowcolor: Option<String>,
+        /// type=1 时强调显示的文字轮廓颜色（RRGGBB，缺省 0x000000）
+        outlinecolor: Option<String>,
     },
     /// 结束链接 [/link]
     LinkEnd,
@@ -155,7 +163,14 @@ pub enum Event {
     /// 点击等待图标 [glyph]
     GlyphConfig(HashMap<String, String>),
     /// 切换消息层 [chgmsg]
-    MessageLayerSwitch { id: Option<String>, layered: i32 },
+    MessageLayerSwitch {
+        /// 目标消息层 ID。缺省时由解释器生成随机 ID（文档：缺省则设置为随机值）
+        id: Option<String>,
+        /// 是否把前一设置压入消息层堆栈（缺省 1；0 用于防止存档膨胀）
+        stack: bool,
+        /// 0=还原为常规消息层 / 1=视为图像层处理 / None（缺省）=独立于图像层之上
+        layered: Option<i32>,
+    },
     /// 回退消息层 [chgmsg_close]
     MessageLayerPop,
     /// 文本动画 [scetween]
@@ -165,23 +180,67 @@ pub enum Event {
     /// 场景退出 [sceout]
     SceneOut,
     /// 自动模式配置 [automode]
-    AutoModeConfig { allow: bool, layer: Option<String> },
-    /// 跳过配置 [skip]
-    SkipConfig { allow: bool, skip_unread: bool },
+    AutoModeConfig {
+        allow: bool,
+        /// 自动模式下自动显示并同步 visible 的图层 ID（缺省禁用）
+        layer: Option<String>,
+        /// 左键单击是否停止自动模式（默认 1；None=保留之前设置）
+        stopbyclick: Option<bool>,
+        /// stop 标签是否停止自动模式（默认 1；None=保留之前设置）
+        stopbystop: Option<bool>,
+        /// 等待播放结束的 SE ID 数组（None=保留之前设置）
+        syncse: Option<Vec<String>>,
+    },
+    /// 跳过配置 [skip]（None=继承之前的设置）
+    SkipConfig {
+        allow: Option<bool>,
+        skip_unread: Option<bool>,
+    },
     /// 历史配置 [backlog]
-    BacklogConfig { allow: bool },
+    BacklogConfig {
+        allow: bool,
+        /// 用于历史文本的消息层 ID（默认 backlog）；None=继承先前设置
+        messagelayer: Option<String>,
+        /// 是否把字体信息一并写入历史文本（默认 1=写入）；None=继承先前设置
+        includefont: Option<bool>,
+        /// 进入历史文本时临时隐藏的图层 ID 列表；None=继承先前设置
+        hide: Option<Vec<String>>,
+        /// 进入历史文本时自动显示（与自动模式同步）的图层 ID；None=禁用自动显示
+        layer: Option<String>,
+        /// 1 时清除当前历史文本中已存储的剧情（缺省/0 不清除）
+        clear: bool,
+    },
     /// 隐藏配置 [hide]
-    HideConfig { allow: bool },
-    /// 已读判定 [alreadyread]
+    HideConfig {
+        allow: bool,
+        /// 隐藏时同时临时隐藏的图层 ID 列表；None（缺省）=继承之前的设置
+        window: Option<Vec<String>>,
+    },
+    /// 已读判定 [alreadyread]（mode=0 不判定 / 1 判定，文档默认 1）
     AlreadyReadConfig { mode: i32 },
-    /// 历史写入 [writebacklog]
-    WriteBacklogConfig { enable: bool },
+    /// 历史写入 [writebacklog]（mode=缺省/0 不存入，1 存入）
+    WriteBacklogConfig { mode: bool },
     /// 缩进设置 [indent]
-    IndentConfig { value: String },
+    IndentConfig {
+        /// 每两个字符一组，交替列出缩进开始/结束字符（如 "「」『』"）
+        pair: String,
+        /// 行首起忽略此数目字符后出现的缩进开始字符（None=任意位置均识别）
+        range: Option<usize>,
+        /// true 时已处于缩进状态也重复嵌套缩进（缺省 false）
+        nest: bool,
+    },
     /// 禁则处理 [prohibit]
-    ProhibitConfig { value: String },
+    ProhibitConfig {
+        /// 行首禁则字符串（连续字符，无分隔符）
+        head: String,
+        /// 行尾禁则字符串（连续字符，无分隔符）
+        foot: String,
+    },
     /// 单词部分字符 [wordparts]
-    WordpartsConfig { value: String },
+    WordpartsConfig {
+        /// 视为单词组成部分的字符集合（连续字符，无分隔符）
+        parts: String,
+    },
 
     // ── 音频事件 ──────────────────────────────────────
     /// 播放 BGM [splay]
@@ -191,13 +250,19 @@ pub enum Event {
         gain: Option<i32>,
         pan: Option<i32>,
         fade_time: Option<u64>,
+        /// 缓冲区大小（毫秒），-1 表示内存播放（仅 Windows/WASM），None=默认缓冲
+        buffer: Option<i32>,
     },
     /// 停止 BGM [sstop]
     BgmStop { fade_time: Option<u64> },
     /// BGM 音量渐变 [sfade]
     BgmFade { gain: i32, time: u64 },
     /// BGM 声像 [span]
-    BgmPan { pan: i32 },
+    BgmPan {
+        pan: i32,
+        /// 渐变时间（毫秒），None=立即切换
+        time: Option<u64>,
+    },
     /// BGM 交叉淡入 [sxfade]
     BgmCrossFade {
         file: String,
@@ -221,13 +286,23 @@ pub enum Event {
     /// SE 音量渐变 [sefade]
     SeFade { id: String, gain: i32, time: u64 },
     /// SE 声像 [sepan]
-    SePan { id: String, pan: i32 },
-    /// 语音播放 [voice]
+    SePan {
+        id: String,
+        pan: i32,
+        /// 渐变时间（毫秒），None=立即切换
+        time: Option<u64>,
+    },
+    /// 语音播放 [voice]（参数与 seplay 完全一致）
     VoicePlay {
+        /// 语音轨 ID（缺省时由核心自动编号）
+        id: Option<String>,
         file: String,
+        loop_play: bool,
         gain: Option<i32>,
         pan: Option<i32>,
         fade_time: Option<u64>,
+        /// 1 时跳过模式下不播放
+        skippable: bool,
     },
     /// 音效完成事件处理器 [setonsoundfinish]
     SoundFinishHandler {
@@ -259,6 +334,8 @@ pub enum Event {
     DebugPrint { level: i32, data: String },
     /// 调试重载 [debugreload]
     DebugReload,
+    /// 重启引擎 [reset]：宿主应重置合成器/音频/控制状态并重新走 boot 管线
+    Reset,
     /// 窗口标题 [caption]
     Caption { data: String },
     /// 鼠标设置 [mouse]
@@ -276,30 +353,85 @@ pub enum Event {
         src: Option<String>,
         dst: Option<String>,
         target: Option<String>,
+        /// wasm_sync：要同步的文件列表 URL（其余 command 忽略）
+        url: Option<String>,
+        /// wasm_sync：要同步文件的基准 URL（其余 command 忽略）
+        baseurl: Option<String>,
+        /// wasm_sync：要同步的文件列表（其余 command 忽略）
+        list: Option<Vec<String>>,
     },
     /// HTTP GET [httpget]
-    HttpGet { url: String },
+    HttpGet {
+        url: String,
+        /// 额外请求头（header_keyN/header_valueN 成对，按 N 升序）
+        headers: Vec<(String, String)>,
+        /// 存储响应码的变量名
+        varname_code: Option<String>,
+        /// 存储响应体的变量名（指定 filename 时忽略）
+        varname_data: Option<String>,
+        /// 把结果存到文件而非变量
+        filename: Option<String>,
+    },
     /// HTTP POST [httppost]
     HttpPost {
         url: String,
-        params: HashMap<String, String>,
+        /// 额外请求头（header_keyN/header_valueN 成对，按 N 升序）
+        headers: Vec<(String, String)>,
+        /// POST 数据键值（keyN/valueN 成对，按 N 升序）
+        data: Vec<(String, String)>,
+        /// 以文件内容为值的 POST 数据（keyN/fileN 成对，值为文件路径）
+        file_data: Vec<(String, String)>,
+        /// 存储响应码的变量名
+        varname_code: Option<String>,
+        /// 存储响应体的变量名（指定 filename 时忽略）
+        varname_data: Option<String>,
+        /// 把结果存到文件而非变量
+        filename: Option<String>,
     },
     /// 打开浏览器 [openbrowser]
     OpenBrowser { url: String },
     /// 自动存档配置 [autosave]
-    AutoSaveConfig { allow: bool },
+    ///
+    /// allow：0=禁用；1=退出/切后台时自动保存；2=每次用户输入等待时自动保存
+    AutoSaveConfig { allow: i32 },
     /// 紧急回避配置 [avoid]
-    AvoidConfig { allow: bool },
+    AvoidConfig {
+        /// 紧急回避图像文件路径，None（缺省）=禁用紧急回避功能
+        file: Option<String>,
+        /// 回避期间窗口按钮行为：0=禁用 / 1=默认操作 / 2=退出回避并执行处理器
+        windowbutton: i32,
+    },
     /// 振动 [vibrate]
     Vibrate { time: u64 },
     /// 状态栏 [statusbar]
     StatusBar { visible: bool },
-    /// 应用内购买 [purchase]
-    Purchase { item: String },
+    /// 应用内购买 [purchase]（仅 iOS/Android）
+    Purchase {
+        /// false=仅获取商品信息不购买；缺省或 1=执行购买
+        purchase: bool,
+        /// 结果存储变量名
+        varname: Option<String>,
+        /// iOS：商品 ID
+        productid: Option<String>,
+        /// iOS：true=执行恢复流程（此时 purchase 被忽略）
+        restore: bool,
+        /// Android：Google Play 许可密钥
+        key: Option<String>,
+        /// Android：商品 ID
+        sku: Option<String>,
+        /// Android：true=执行消耗流程
+        consume: bool,
+    },
     /// 调用原生代码 [callnative]
     CallNative {
-        function: String,
-        params: HashMap<String, String>,
+        /// 存储原生代码返回字符串的变量名
+        result: Option<String>,
+        /// 模块（Windows: DLL 路径；iOS: 类名；Android: JNI 完整类名）
+        module: Option<String>,
+        /// 函数名/选择器名/方法名（WASM 时为直接 eval 的 JS 代码）
+        method: String,
+        /// 传给函数的字符串
+        param: Option<String>,
     },
 
     // ── 事件处理器事件 ──────────────────────────────────────
@@ -391,18 +523,28 @@ pub enum Event {
     VideoPlay {
         id: Option<String>,
         file: String,
-        skip: bool,
+        /// 0=禁止跳过 / 1=单击跳过（缺省）/ 2=仅右键菜单方式跳过
+        skip: i32,
         loop_play: bool,
+        /// Ogg Theora 视频图层的跳帧延迟阈值（毫秒）；None（缺省/-1）=不跳帧
+        delay_margin_ms: Option<i32>,
+        /// 仅 Windows 全屏：0=VMR-7 / 1=VMR-9 / 2=EVR（其它平台忽略）
+        mode: Option<i32>,
     },
     /// 视频播放完成事件处理器 [setonvideofinish]
     VideoFinishHandler {
+        /// 目标图层 ID
+        id: Option<String>,
         file: Option<String>,
         label: Option<String>,
         call: bool,
         handler: Option<String>,
     },
     /// 解除视频播放完成事件处理器 [delonvideofinish]
-    VideoFinishHandlerDel,
+    VideoFinishHandlerDel {
+        /// 待取消的图层 ID
+        id: Option<String>,
+    },
 
     // ── 转场/截图 ──────────────────────────────────────
     /// 图层树转换 [trans]
@@ -524,6 +666,24 @@ pub enum WaitReason {
         milliseconds: u64,
         /// 输入策略：0=不接受输入，1=输入解除等待，2=跳过中不停止
         input: i32,
+    },
+    /// 等待 SE 播放结束 [wait se="ID"]
+    Se {
+        /// SE 的 ID
+        id: String,
+        /// 与 time 参数并用时的等待毫秒数——从该 SE **开始播放的时刻**起算
+        /// （文档 wait.md）；`None` 表示等到 SE 播放结束
+        time: Option<u64>,
+    },
+    /// 等待视频图层播放结束 [wait video="层ID"]
+    VideoLayer {
+        /// 视频图层 ID
+        id: String,
+    },
+    /// 等待场景文本 Tween 完成 [wait scenario="1|2"]
+    ScenarioTween {
+        /// 1=等待场景文本出现的 Tween 完成，2=等待场景文本隐藏的 Tween 完成
+        mode: i32,
     },
 }
 

@@ -371,6 +371,7 @@ impl TagRegistry {
         registry.register("sefade", SefadeHandler);
         registry.register("sepan", SepanHandler);
         registry.register("voice", VoiceHandler);
+        registry.register("/voice", VoiceEndHandler);
         registry.register("setonsoundfinish", SetOnSoundFinishHandler);
         registry.register("delonsoundfinish", DelOnSoundFinishHandler);
         registry.register("sefadein", SefadeinHandler);
@@ -398,6 +399,9 @@ impl TagRegistry {
         registry.register("statusbar", StatusbarHandler);
         registry.register("purchase", PurchaseHandler);
         registry.register("callnative", CallnativeHandler);
+        // 弃用标签：显式空转，消除 Event::Custom 回退噪音
+        registry.register("slider", LegacyNoopHandler);
+        registry.register("uidel", LegacyNoopHandler);
 
         // 事件处理器标签
         registry.register("setonpush", SetOnPushHandler);
@@ -426,6 +430,20 @@ impl TagRegistry {
         registry.register("delonhidein", DelOnHideInHandler);
         registry.register("delonhideout", DelOnHideOutHandler);
         registry.register("delonwindowbutton", DelOnWindowButtonHandler);
+
+        // legacy seton*/delon* 别名（向后兼容）：转发到 lyevent 机制
+        registry.register("setonclick", SetOnClickHandler);
+        registry.register("setondrag", SetOnDragHandler);
+        registry.register("setondragin", SetOnDragInHandler);
+        registry.register("setondragout", SetOnDragOutHandler);
+        registry.register("setonrollout", SetOnRolloutHandler);
+        registry.register("setonrollover", SetOnRolloverHandler);
+        registry.register("delonclick", DelOnClickHandler);
+        registry.register("delondrag", DelOnDragHandler);
+        registry.register("delondragin", DelOnDragInHandler);
+        registry.register("delondragout", DelOnDragOutHandler);
+        registry.register("delonrollout", DelOnRolloutHandler);
+        registry.register("delonrollover", DelOnRolloverHandler);
 
         // 图层高级标签
         registry.register("lytween", LytweenHandler);
@@ -581,12 +599,35 @@ impl TagHandler for WaitHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         let time = ctx.resolve_param("time")?.as_int().unwrap_or(0) as u64;
         let input = ctx.resolve_param("input")?.as_int().unwrap_or(0) as i32;
-        Ok(TagResult::Wait(Event::Wait {
-            reason: crate::event::WaitReason::Timed {
+        // 文档 wait.md：指定 scenario 或 video 参数时 time 被忽略；
+        // se 与 time 并用时表示从该 SE 开始播放的时刻起算的毫秒数。
+        let reason = if let Some(video) = ctx
+            .instruction
+            .get("video")
+            .filter(|v| !v.is_empty())
+        {
+            crate::event::WaitReason::VideoLayer {
+                id: video.to_string(),
+            }
+        } else if let Some(mode) = ctx
+            .instruction
+            .get("scenario")
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|m| *m == 1 || *m == 2)
+        {
+            crate::event::WaitReason::ScenarioTween { mode }
+        } else if let Some(se) = ctx.instruction.get("se").filter(|v| !v.is_empty()) {
+            crate::event::WaitReason::Se {
+                id: se.to_string(),
+                time: ctx.instruction.get("time").is_some().then_some(time),
+            }
+        } else {
+            crate::event::WaitReason::Timed {
                 milliseconds: time,
                 input,
-            },
-        }))
+            }
+        };
+        Ok(TagResult::Wait(Event::Wait { reason }))
     }
 }
 
@@ -690,13 +731,17 @@ impl TagHandler for GoTitleHandler {
     }
 }
 
-/// [reset] 重置标签
+/// [reset] 重启引擎标签
+///
+/// 文档语义是整个引擎回到初始启动状态并从 boot 脚本重跑。解释器侧先清
+/// local/temp 变量域，再发 [`Event::Reset`] 交由宿主重置合成器/音频/控制
+/// 状态并重新走 boot 管线。
 struct ResetHandler;
 
 impl TagHandler for ResetHandler {
     fn execute(&self, ctx: &mut ExecutionContext<'_>) -> Result<TagResult> {
         ctx.variables.reset();
-        Ok(TagResult::Continue)
+        Ok(TagResult::Emit(Event::Reset))
     }
 }
 
@@ -839,6 +884,49 @@ mod tests {
             WaitReason::Timed {
                 milliseconds: 2500,
                 input: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn wait_parses_se_video_and_scenario_sources() {
+        // wait.md：se=SE 的 ID，等待其播放结束；与 time 并用时从 SE 开播起算
+        match run_wait("se=\"bar\"") {
+            WaitReason::Se { id, time } => {
+                assert_eq!(id, "bar");
+                assert_eq!(time, None);
+            }
+            other => panic!("expected Se, got {other:?}"),
+        }
+        match run_wait("se=\"bar\" time=\"1500\"") {
+            WaitReason::Se { id, time } => {
+                assert_eq!(id, "bar");
+                assert_eq!(time, Some(1500));
+            }
+            other => panic!("expected Se, got {other:?}"),
+        }
+
+        // video=层 ID，等待视频层播放结束；指定时 time 被忽略
+        match run_wait("video=\"mv\" time=\"999\"") {
+            WaitReason::VideoLayer { id } => assert_eq!(id, "mv"),
+            other => panic!("expected VideoLayer, got {other:?}"),
+        }
+
+        // scenario=1/2 等待场景文本 Tween；指定时 time 被忽略
+        assert!(matches!(
+            run_wait("scenario=\"1\" time=\"999\""),
+            WaitReason::ScenarioTween { mode: 1 }
+        ));
+        assert!(matches!(
+            run_wait("scenario=\"2\""),
+            WaitReason::ScenarioTween { mode: 2 }
+        ));
+        // scenario=0（缺省语义）不构成 Tween 等待，退回 Timed
+        assert!(matches!(
+            run_wait("scenario=\"0\" time=\"100\""),
+            WaitReason::Timed {
+                milliseconds: 100,
+                ..
             }
         ));
     }
