@@ -1,5 +1,7 @@
 # ASB Interpreter
 
+## 主线已并入art3m1s-core，该仓库已归档
+
 Artemis Engine 脚本解释器库。它负责解析/执行 ASB、AST、IET 文本化脚本，提供变量、表达式、宏、Lua bridge、tag handler 和事件回调。渲染、音频、视频、文件系统和输入不在本 crate 内直接实现，而是通过 `Event` 与 `EngineCallbacks` 交给宿主 runtime。
 
 生产使用方是 `https://github.com/Alphaly2K/art3m1s-core`。
