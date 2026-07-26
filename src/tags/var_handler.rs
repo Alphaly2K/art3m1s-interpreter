@@ -50,6 +50,9 @@ pub struct HostQueryHooks {
     pub backlog_tags: Box<dyn Fn(usize, bool) -> Option<Vec<String>> + Send + Sync>,
     /// (消息层 id, allfont) -> 当前页已执行的文本相关标签序列；层不存在返回 None。
     pub message_tags: Box<dyn Fn(&str, bool) -> Option<Vec<String>> + Send + Sync>,
+    /// 当前消息层文本度量 `(整体宽度, 总高度, 最后一行宽度)`。
+    /// 供 get_message_layer_width/height/line_width。
+    pub message_layer_metrics: Box<dyn Fn() -> (f32, f32, f32) + Send + Sync>,
 }
 
 static HOST_QUERY_HOOKS: RwLock<Option<HostQueryHooks>> = RwLock::new(None);
@@ -474,11 +477,23 @@ pub fn execute_var_system(
             set_pseudo_array(name, tags.as_deref(), variables);
         }
 
-        "get_layer_info"
-        | "get_message_layer_width"
+        // 当前消息层文本度量（文档 var/get_message_layer_*.md）：整体宽度 /
+        // 总高度 / 最后一行宽度。经宿主钩子从 text_renderer 每帧快照读取。
+        "get_message_layer_width"
         | "get_message_layer_height"
-        | "get_message_layer_line_width"
-        | "get_font" => {
+        | "get_message_layer_line_width" => {
+            let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
+            let (width, height, line_width) =
+                with_host_hooks(|h| (h.message_layer_metrics)()).unwrap_or((0.0, 0.0, 0.0));
+            let value = match system {
+                "get_message_layer_width" => width,
+                "get_message_layer_height" => height,
+                _ => line_width,
+            };
+            variables.set(name, Value::Float(value as f64));
+        }
+
+        "get_layer_info" | "get_font" => {
             let name = params.get("name").map(|s| s.as_str()).unwrap_or("");
             // get_layer_info 需要设置子字段（left/top/width/height），
             // 否则 Lua 端 e:var("t.ly.width") 会读到 nil。
@@ -1107,6 +1122,7 @@ mod tests {
             message_tags: Box::new(|id, _| {
                 (id == "adv01").then(|| vec!["[print data=\"cur\"]".to_string()])
             }),
+            message_layer_metrics: Box::new(|| (320.0, 48.0, 120.0)),
         });
 
         let run = |params: &[(&str, &str)]| {
@@ -1141,6 +1157,14 @@ mod tests {
         ]);
         assert_eq!(msg.get("t.m.size").and_then(Value::as_int), Some(1));
         assert_eq!(msg.get("t.m.0").map(Value::as_string).as_deref(), Some("[print data=\"cur\"]"));
+
+        // 文本度量：钩子返回 (320,48,120) → width/height/line_width 分别落值。
+        let w = run(&[("system", "get_message_layer_width"), ("name", "t.w")]);
+        assert_eq!(w.get("t.w").and_then(Value::as_float), Some(320.0));
+        let h = run(&[("system", "get_message_layer_height"), ("name", "t.h")]);
+        assert_eq!(h.get("t.h").and_then(Value::as_float), Some(48.0));
+        let lw = run(&[("system", "get_message_layer_line_width"), ("name", "t.lw")]);
+        assert_eq!(lw.get("t.lw").and_then(Value::as_float), Some(120.0));
 
         // 清理进程级钩子，避免污染其它测试。
         *HOST_QUERY_HOOKS.write().unwrap() = None;

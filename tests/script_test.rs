@@ -65,7 +65,6 @@ mod script_tests {
 "#;
 
         let mut interpreter = Interpreter::new(InterpreterConfig::default());
-        let mut blocked = false;
 
         interpreter.set_callback(|event| match event {
             Event::Wait { reason } => {
@@ -80,9 +79,9 @@ mod script_tests {
 
         // 执行到 [stop]
         let result = interpreter.run();
+        let blocked = matches!(result, Ok(ExecutionResult::Wait(_)));
         match result {
             Ok(ExecutionResult::Wait(event)) => {
-                blocked = true;
                 println!("Script blocked at: {:?}", event);
             }
             _ => panic!("Expected script to block at [stop]"),

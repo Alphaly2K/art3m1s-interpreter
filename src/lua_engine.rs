@@ -97,6 +97,17 @@ pub trait EngineCallbacks: Send + Sync {
     /// 获取触摸点位置
     fn get_touch_point(&self, index: u32) -> (i32, i32);
 
+    /// 获取全部触摸点 (id, x, y)，供 getTouchPoint() 无参表形态。
+    /// 缺省退化为按序号枚举、以序号充当 id（无真实触摸 id 的后端够用）。
+    fn get_touch_points(&self) -> Vec<(u32, i32, i32)> {
+        (0..self.get_touch_count())
+            .map(|i| {
+                let (x, y) = self.get_touch_point(i);
+                (i, x, y)
+            })
+            .collect()
+    }
+
     /// 检查文件是否存在
     fn is_file_exists(&self, path: &str) -> bool;
 
@@ -412,53 +423,8 @@ impl EngineApi {
     pub fn new(ctx: Arc<Mutex<EngineContext>>) -> Self {
         Self { ctx }
     }
-
-    /// 分发事件通过事件过滤器。
-    /// 返回 Some(0/1/2) 表示过滤器已处理，None 表示没有过滤器或过滤器返回 0（引擎处理）。
-    /// - 0: 引擎正常处理
-    /// - 1: 脚本已处理，引擎什么都不做
-    /// - 2: 分发失败，引擎执行默认行为
-    pub fn dispatch_event(
-        &self,
-        lua: &mlua::Lua,
-        event_name: &str,
-        params: &HashMap<String, String>,
-    ) -> Option<i32> {
-        let ctx = self.ctx.lock().unwrap();
-        let filter_key = ctx.event_filter.as_ref()?;
-
-        // 从 registry 获取过滤器函数
-        let filter: mlua::Function = match lua.registry_value(filter_key) {
-            Ok(f) => f,
-            Err(_) => return None,
-        };
-
-        // 构造参数表
-        let params_table = match lua.create_table() {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
-        for (k, v) in params {
-            let _ = params_table.set(k.as_str(), v.as_str());
-        }
-
-        // 调用过滤器: eventFilter(e, nm, p)
-        // e 是 EngineApi 自身（self），但这里我们不能直接传递 self
-        // 所以传递一个简化的事件对象
-        let event_obj = match lua.create_table() {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
-
-        match filter.call::<i32>((event_obj, event_name, params_table)) {
-            Ok(result) => Some(result),
-            Err(e) => {
-                ctx.callbacks
-                    .debug(0, &format!("eventFilter error: {}", e), false);
-                None
-            }
-        }
-    }
+    // 事件过滤器的实际派发已上移到 Interpreter::run_event_filter（宿主在把命中的
+    // 事件交给处理器之前调用），那里同时持有 Lua 句柄与 EngineContext。
 }
 
 /// Script-visible E-Mote layer handle.
@@ -876,11 +842,30 @@ impl UserData for EngineApi {
             Ok(ctx.callbacks.get_touch_count())
         });
 
-        // e:getTouchPoint(index)
-        methods.add_method("getTouchPoint", |_lua, this, index: u32| {
+        // e:getTouchPoint([index])
+        // - 无参（文档形态）：返回按触摸唯一 id 索引的表 {[id]={x=..,y=..}, ..}。
+        // - 带序号（兼容旧形态）：返回该序号触摸点的 (x, y) 二元组。
+        methods.add_method("getTouchPoint", |lua, this, index: Option<u32>| {
             let ctx = this.ctx.lock().unwrap();
-            let (x, y) = ctx.callbacks.get_touch_point(index);
-            Ok((x, y))
+            match index {
+                Some(i) => {
+                    let (x, y) = ctx.callbacks.get_touch_point(i);
+                    Ok(mlua::MultiValue::from_vec(vec![
+                        mlua::Value::Integer(x as mlua::Integer),
+                        mlua::Value::Integer(y as mlua::Integer),
+                    ]))
+                }
+                None => {
+                    let table = lua.create_table()?;
+                    for (id, x, y) in ctx.callbacks.get_touch_points() {
+                        let point = lua.create_table()?;
+                        point.set("x", x)?;
+                        point.set("y", y)?;
+                        table.set(id, point)?;
+                    }
+                    Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Table(table)]))
+                }
+            }
         });
 
         // e:file("path") -> file bytes as a Lua string

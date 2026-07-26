@@ -522,6 +522,47 @@ impl Interpreter {
         &self.engine_ctx
     }
 
+    /// 运行 e:setEventFilter 设置的事件过滤器（docs/lua/engine/setEventFilter.txt）。
+    ///
+    /// 宿主在把一个已命中的事件（lyevent/aevent/输入事件…）派发给其处理器之前调用：
+    /// `name` = 事件设置时的标签名（如 "lyevent"），`params` = 该标签参数（含 id/type/
+    /// label 等，均为字符串）。返回值：
+    /// - `None`：未设置过滤器，或过滤器返回 0/出错 —— 引擎按默认方式派发。
+    /// - `Some(1)`：脚本已自行处理，引擎**不**再派发。
+    /// - `Some(2)`：过滤器指示派发失败，引擎执行默认行为（与 None 同等对待）。
+    ///
+    /// 未设置过滤器时零开销（不加载 Lua 值）。
+    pub fn run_event_filter(
+        &self,
+        name: &str,
+        params: &std::collections::HashMap<String, String>,
+    ) -> Option<i32> {
+        let filter: mlua::Function = {
+            let ctx = self.engine_ctx.lock().unwrap();
+            let key = ctx.event_filter.as_ref()?;
+            self.lua.registry_value(key).ok()?
+        };
+
+        let params_table = self.lua.create_table().ok()?;
+        for (k, v) in params {
+            let _ = params_table.set(k.as_str(), v.as_str());
+        }
+        // 过滤器签名 eventFilter(e, name, param)：e 传空表占位（宿主不便把 EngineApi
+        // 自身回传，脚本实际用到的是 name/param）。
+        let event_obj = self.lua.create_table().ok()?;
+        match filter.call::<i32>((event_obj, name, params_table)) {
+            Ok(result) => Some(result),
+            Err(err) => {
+                self.engine_ctx.lock().unwrap().callbacks.debug(
+                    0,
+                    &format!("eventFilter error: {err}"),
+                    false,
+                );
+                None
+            }
+        }
+    }
+
     /// 加载脚本（从文本）
     pub fn load_script(&mut self, name: &str, content: &str) -> Result<()> {
         let script = Script::parse(name, content)?;
@@ -1936,6 +1977,48 @@ mod tests {
     use crate::{CallbackResult, Event, ExecutionResult, InterpreterConfig, Value};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn event_filter_intercepts_and_reports_verdict() {
+        let interpreter = Interpreter::new(InterpreterConfig::default());
+        // 未安装过滤器：返回 None（引擎按默认方式派发）。
+        assert_eq!(
+            interpreter.run_event_filter("lyevent", &HashMap::new()),
+            None
+        );
+
+        // 安装过滤器：捕获 name/param.id，返回 1（脚本已自行处理）。
+        interpreter
+            .lua()
+            .load(
+                r#"
+                __engine:setEventFilter(function(e, name, param)
+                    seen_name = name
+                    seen_id = param.id
+                    return 1
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "10".to_string());
+        params.insert("type".to_string(), "click".to_string());
+        assert_eq!(interpreter.run_event_filter("lyevent", &params), Some(1));
+
+        let globals = interpreter.lua().globals();
+        assert_eq!(globals.get::<String>("seen_name").unwrap(), "lyevent");
+        assert_eq!(globals.get::<String>("seen_id").unwrap(), "10");
+
+        // 清除过滤器后重新回到 None。
+        interpreter
+            .lua()
+            .load("__engine:setEventFilter(nil)")
+            .exec()
+            .unwrap();
+        assert_eq!(interpreter.run_event_filter("lyevent", &params), None);
+    }
 
     #[test]
     fn load_text_file_decodes_with_configured_encoding() {
